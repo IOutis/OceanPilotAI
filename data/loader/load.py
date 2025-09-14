@@ -8,6 +8,39 @@ import wodpy
 import tempfile
 import os
 
+
+async def parse_excel_file(file_content: bytes) -> dict:
+    """Parses an Excel file content and returns a data preview."""
+    preview = None
+    data = None
+    try:
+        buffer = io.BytesIO(file_content)
+        # Attempt to read as Excel file
+        df = pd.read_excel(buffer, engine='openpyxl')
+        data = df.to_dict(orient='records')
+        preview = df.head().to_dict(orient='records')
+        print(f"Excel parsed successfully with {len(data)} rows.")
+        print(f"Prview Excel parsed successfully with {len(preview)} rows.")
+    except Exception as e:
+        preview = {"error": f"Could not parse as Excel: {str(e)}"}
+    return data,preview
+
+async def parse_parquet_file(file_content: bytes) -> dict:
+    """Parses a Parquet file content and returns a data preview."""
+    preview = None
+    data = None
+    try:
+        buffer = io.BytesIO(file_content)
+        # Attempt to read as Parquet file
+        df = pd.read_parquet(buffer)
+        data = df.to_dict(orient='records')
+        preview = df.head().to_dict(orient='records')
+        print(f"Parquet parsed successfully with {len(data)} rows.")
+        print(f"Prview Parquet parsed successfully with {len(preview)} rows.")
+    except Exception as e:
+        preview = {"error": f"Could not parse as Parquet: {str(e)}"}
+    return data,preview
+
 async def parse_csv_file(file_content: bytes) -> dict:
     """Parses a CSV file content and returns a data preview."""
     preview = None
@@ -131,13 +164,20 @@ async def extract_file_metadata(file: UploadFile) -> dict:
     # This logic correctly routes the file to the right parsing function.
     if file.filename.endswith('.csv') or file.filename.endswith('.csv.gz'):
         print(f"Detected CSV file: {file.filename}. Routing to CSV parser.")
-        # FIX: Added 'await' to get the result from the async function
         data,sample_data = await parse_csv_file(file_content)
-    # A simple check for WOD files which often just have a .gz extension
+
     elif file.filename.endswith('.gz'):
         print(f"Detected .gz file: {file.filename}. Routing to WOD parser.")
-        # FIX: Added 'await' to get the result from the async function
         data,sample_data = await parse_wod_file(file_content)
+
+    elif file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
+        print(f"Detected Excel file: {file.filename}. Routing to Excel parser.")
+        data,sample_data = await parse_excel_file(file_content)
+
+    elif file.filename.endswith('.parquet'):
+        print(f"Detected Parquet file: {file.filename}. Routing to Parquet parser.")
+        data,sample_data = await parse_parquet_file(file_content)
+
     else:
         data = {"error": "Unsupported file type."}
 
