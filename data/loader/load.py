@@ -25,21 +25,120 @@ async def parse_excel_file(file_content: bytes) -> dict:
         preview = {"error": f"Could not parse as Excel: {str(e)}"}
     return data,preview
 
-async def parse_parquet_file(file_content: bytes) -> dict:
-    """Parses a Parquet file content and returns a data preview."""
-    preview = None
-    data = None
+async def parse_json_file(file_content: bytes) -> tuple:
+    """Parses a JSON file and returns preview + full data."""
     try:
         buffer = io.BytesIO(file_content)
-        # Attempt to read as Parquet file
-        df = pd.read_parquet(buffer)
-        data = df.to_dict(orient='records')
-        preview = df.head().to_dict(orient='records')
-        print(f"Parquet parsed successfully with {len(data)} rows.")
-        print(f"Prview Parquet parsed successfully with {len(preview)} rows.")
+        df = pd.read_json(buffer, lines=False)
+        data = df.to_dict(orient="records")
+        preview = df.head().to_dict(orient="records")
+        print(f"JSON parsed successfully with {len(data)} rows.")
+        return data, preview
     except Exception as e:
-        preview = {"error": f"Could not parse as Parquet: {str(e)}"}
-    return data,preview
+        return None, {"error": f"Could not parse as JSON: {str(e)}"}
+
+async def parse_feather_file(file_content: bytes) -> tuple:
+    """Parses a Feather file into preview + full data."""
+    try:
+        buffer = io.BytesIO(file_content)
+        df = pd.read_feather(buffer)
+        data = df.to_dict(orient="records")
+        preview = df.head().to_dict(orient="records")
+        print(f"Feather parsed successfully with {len(data)} rows.")
+        return data, preview
+    except Exception as e:
+        return None, {"error": f"Could not parse as Feather: {str(e)}"}
+
+async def parse_hdf5_file(file_content: bytes) -> tuple:
+    """Parses an HDF5 file into preview + full data (first key only)."""
+    try:
+        buffer = io.BytesIO(file_content)
+        with pd.HDFStore(buffer) as store:
+            keys = store.keys()
+            if not keys:
+                return None, {"error": "Empty HDF5 file"}
+            df = store[keys[0]]
+        data = df.to_dict(orient="records")
+        preview = df.head().to_dict(orient="records")
+        print(f"HDF5 parsed successfully with {len(data)} rows.")
+        return data, preview
+    except Exception as e:
+        return None, {"error": f"Could not parse as HDF5: {str(e)}"}
+
+import xarray as xr
+
+async def parse_netcdf_file(file_content: bytes) -> tuple:
+    """Parses a NetCDF file and returns variable summary + sample."""
+    try:
+        buffer = io.BytesIO(file_content)
+        ds = xr.open_dataset(buffer)
+        preview = {var: ds[var].values[:3].tolist() for var in list(ds.data_vars)[:5]}
+        data = {var: ds[var].values.tolist() for var in list(ds.data_vars)[:5]}  # limit for safety
+        print(f"NetCDF parsed with variables: {list(ds.data_vars)}")
+        return data, preview
+    except Exception as e:
+        return None, {"error": f"Could not parse as NetCDF: {str(e)}"}
+
+
+import pandas as pd
+import geopandas as gpd
+import io
+from fastapi.encoders import jsonable_encoder
+
+import io
+import pandas as pd
+
+import io
+import pandas as pd
+import math
+
+def make_json_safe(obj):
+    """Recursively convert objects to JSON-safe types."""
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_safe(v) for v in obj]
+    elif isinstance(obj, (int, str)) or obj is None:
+        return obj
+    elif isinstance(obj, float):
+        if math.isfinite(obj):
+            return obj
+        else:
+            return None  # convert NaN/inf to None
+    elif isinstance(obj, pd.Timestamp):
+        return str(obj)
+    elif isinstance(obj, bytes):
+        return obj.decode(errors="ignore")
+    else:
+        return str(obj)
+
+async def parse_parquet_file(file_content: bytes) -> tuple:
+    """Parses a Parquet file content and returns JSON-safe preview + data."""
+    try:
+        buffer = io.BytesIO(file_content)
+        df = pd.read_parquet(buffer)
+
+        # Convert each column to JSON-safe types
+        for col in df.columns:
+            if pd.api.types.is_object_dtype(df[col]):
+                df[col] = df[col].apply(lambda x: str(x) if isinstance(x, bytes) else x)
+            elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].astype(str)
+            elif pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].apply(lambda x: float(x) if pd.notnull(x) and math.isfinite(x) else None)
+            elif isinstance(df[col].dtype, pd.arrays.NumpyExtensionDtype):
+                df[col] = df[col].apply(lambda x: x.tolist() if hasattr(x, "tolist") else x)
+
+        # Convert to dict and make JSON-safe recursively
+        data = make_json_safe(df.to_dict(orient="records"))
+        preview = make_json_safe(df.head().to_dict(orient="records"))
+
+        print(f"Parquet parsed successfully with {len(data)} rows.")
+        return data, preview
+
+    except Exception as e:
+        return None, {"error": f"Could not parse as Parquet: {str(e)}"}
+
 
 async def parse_csv_file(file_content: bytes) -> dict:
     """Parses a CSV file content and returns a data preview."""
@@ -177,6 +276,22 @@ async def extract_file_metadata(file: UploadFile) -> dict:
     elif file.filename.endswith('.parquet'):
         print(f"Detected Parquet file: {file.filename}. Routing to Parquet parser.")
         data,sample_data = await parse_parquet_file(file_content)
+    elif file.filename.endswith('.json'):
+        print(f"Detected JSON file: {file.filename}. Routing to JSON parser.")
+        data, sample_data = await parse_json_file(file_content)
+
+    elif file.filename.endswith('.feather'):
+        print(f"Detected Feather file: {file.filename}. Routing to Feather parser.")
+        data, sample_data = await parse_feather_file(file_content)
+
+    elif file.filename.endswith(('.h5', '.hdf5')):
+        print(f"Detected HDF5 file: {file.filename}. Routing to HDF5 parser.")
+        data, sample_data = await parse_hdf5_file(file_content)
+
+    elif file.filename.endswith('.nc'):
+        print(f"Detected NetCDF file: {file.filename}. Routing to NetCDF parser.")
+        data, sample_data = await parse_netcdf_file(file_content)
+
 
     else:
         data = {"error": "Unsupported file type."}

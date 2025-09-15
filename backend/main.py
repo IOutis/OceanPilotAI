@@ -263,6 +263,7 @@ async def create_upload_file(session_id: str = Form(...), file: UploadFile = Fil
     SESSIONS[session_id]["manager"] = manager
     SESSIONS[session_id]['uploads'].append(metadata)
     logger.info(f"Stored metadata for session {session_id}. Total uploads: {len(SESSIONS[session_id]['uploads'])}")
+    # logger.info(f"Meta data: {metadata}")   
     return metadata
 
 @app.websocket("/ws")
