@@ -7,6 +7,61 @@ import io
 import wodpy
 import tempfile
 import os
+from pandas import json_normalize
+
+def flatten_record(record, parent_key='', sep='.'):
+    """
+    Recursively flattens a single dict record so all values are primitive types.
+    Nested dicts/lists are expanded with dot notation keys.
+    """
+    items = {}
+    if isinstance(record, dict):
+        for k, v in record.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.update(flatten_record(v, new_key, sep=sep))
+            elif isinstance(v, list):
+                # Flatten lists by joining values as comma-separated string
+                if all(isinstance(i, (str, int, float, bool, type(None))) for i in v):
+                    items[new_key] = ','.join(str(i) for i in v)
+                else:
+                    # If list contains dicts, flatten each and join as string
+                    items[new_key] = ';'.join(
+                        str(flatten_record(i, '', sep=sep)) if isinstance(i, dict) else str(i)
+                        for i in v
+                    )
+            else:
+                items[new_key] = v
+    else:
+        items[parent_key] = record
+    return items
+
+def flatten_data(data):
+    """
+    Flattens a list of dict records so all values are primitive types.
+    Returns a new list of flattened dicts.
+    """
+    return [flatten_record(record) for record in data]
+
+
+def flatten_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flattens nested structures in a pandas DataFrame.
+    - Dicts become separate columns.
+    - Lists become exploded into multiple rows.
+    """
+    # Step 1: Expand dict-like columns
+    dict_cols = [col for col in df.columns if df[col].apply(lambda x: isinstance(x, dict)).any()]
+    for col in dict_cols:
+        expanded = json_normalize(df[col]).add_prefix(f"{col}.")
+        df = pd.concat([df.drop(columns=[col]), expanded], axis=1)
+
+    # Step 2: Explode list-like columns
+    list_cols = [col for col in df.columns if df[col].apply(lambda x: isinstance(x, list)).any()]
+    for col in list_cols:
+        df = df.explode(col).reset_index(drop=True)
+
+    return df
 
 
 async def parse_excel_file(file_content: bytes) -> dict:
@@ -161,6 +216,146 @@ async def parse_csv_file(file_content: bytes) -> dict:
         preview = {"error": f"Could not parse as CSV: {str(e)}"}
     return data,preview
 
+def _process_single_wod_profile(profile: wod.WodProfile) -> pd.DataFrame:
+    """
+    Takes a single wodpy profile object and transforms it into a "long",
+    tabular DataFrame, handling different WOD data structures. This process
+    "flattens" the data from lists into individual rows.
+    """
+    # --- METHOD 1: Try standard helper functions first for all common variables ---
+    data_vectors = {
+        'depth': profile.z(),
+        'temperature': profile.t(),
+        'salinity': profile.s(),
+        'oxygen': profile.oxygen(),
+        'phosphate': profile.phosphate(),
+        'silicate': profile.silicate(),
+        # 'nitrate': profile.nitrate(),
+        'pH': profile.pH(),
+        'pressure': profile.p(),
+    }
+    valid_vectors = {k: v.tolist() for k, v in data_vectors.items() if v is not None}
+    
+    # --- METHOD 2: If standard methods fail, parse the raw profile_data ---
+    if not valid_vectors and profile.profile_data:
+        print("Standard accessors failed, parsing raw profile_data.")
+        try:
+            depths = [level.get('Depth') for level in profile.profile_data]
+            # Assuming the primary measurement is the first variable
+            values = [level['variables'][0].get('Value') for level in profile.profile_data]
+            # Try to get the variable name from metadata
+            var_name = profile.var_metadata(1).get('name', 'primary_value').lower()
+            
+            valid_vectors = {'depth': depths, var_name: values}
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Could not parse raw profile_data for a profile: {e}")
+            return pd.DataFrame()
+
+    if not valid_vectors:
+        return pd.DataFrame()
+        
+    df = pd.DataFrame(valid_vectors)
+    df['latitude'] = float(profile.latitude())
+    df['longitude'] = float(profile.longitude())
+    df['date'] = str(profile.datetime())
+    df['cruise'] = profile.cruise()
+    
+    return df
+
+
+# async def parse_wod_file(file_content: bytes) -> dict:
+#     """
+#     Decompresses a WOD .gz file to ASCII, parses profiles with wodpy,
+#     and returns a small preview of metadata + measurements.
+#     """
+#     temp_ascii_path = "temp_wod_ascii.txt"
+#     try:
+#         # 1. Write decompressed content to an ASCII file
+#         with gzip.open(io.BytesIO(file_content), "rb") as f_in:
+#             with open(temp_ascii_path, "wb") as f_out:
+#                 shutil.copyfileobj(f_in, f_out)
+
+#         # 2. Open ASCII file for parsing
+#         profiles_preview = []
+#         profiles = []
+#         with open(temp_ascii_path, "r") as fid:
+#             while True:
+#                 try:
+#                     profile = wod.WodProfile(fid)
+#                     print("Profile : ",profile.profile_data)
+#                     profile_df = _process_single_wod_profile(profile)
+#                     if not profile_df.empty:
+#                         profiles.append(profile_df)
+#                     # variables = []
+#                     # for i in range(len(profile.profile_data)):
+#                     #     variables.append(profile.profile_data[i]["variables"])
+#                     # oxygen =profile.oxygen()
+#                     # pH = profile.pH()
+#                     # p = profile.p()
+#                     # z = profile.z()
+#                     # t = profile.t()
+#                     # s = profile.s()
+#                     # silicate = profile.silicate()
+#                     # phosphate = profile.phosphate()
+                    
+#                     # profiles.append({
+#                     #     "cruise": profile.cruise(),
+#                     #     "latitude": float(profile.latitude()),
+#                     #     "longitude": float(profile.longitude()),
+#                     #     "date": str(profile.datetime()),
+#                     #     "levels": int(profile.n_levels()),
+#                     #     "depths": z.tolist() if z is not None else [],
+#                     #     "biological_header": profile.biological_header,  # if this is a dict, it's safe
+#                     #     "oxygen": oxygen.tolist() if oxygen is not None else [],
+#                     #     "pH": pH.tolist() if pH is not None else [],
+#                     #     "pressure": p.tolist() if p is not None else [],
+#                     #     # "nitrate": variables[:3],  # double-check if variables contain arrays too
+#                     #     "temperatures":t.tolist() if t is not None else [],
+#                     #     "salinity":s.tolist() if s is not None else [],
+#                     #     "silicate":silicate.tolist() if silicate is not None else [],
+#                     #     "phosphate":phosphate.tolist() if phosphate is not None else [],
+#                     #     "var":profile.var_metadata(1)
+#                     # })
+#                     # if len(profiles_preview) < 3:
+#                     #     profiles_preview.append({
+#                     #         "cruise": profile.cruise(),
+#                     #     "latitude": float(profile.latitude()),
+#                     #     "longitude": float(profile.longitude()),
+#                     #     "date": str(profile.datetime()),
+#                     #     "levels": int(profile.n_levels()),
+#                     #     "depths": z.tolist()[:3] if z is not None else [],
+#                     #     "biological_header": profile.biological_header,  # if this is a dict, it's safe
+#                     #     "oxygen": oxygen.tolist()[:3] if oxygen is not None else [],
+#                     #     "pH": pH.tolist()[:3] if pH is not None else [],
+#                     #     "pressure": p.tolist()[:3] if p is not None else [],
+#                     #     # "nitrate": variables[:3],  # double-check if variables contain arrays too
+#                     #     "temperatures":t.tolist()[:3] if t is not None else [],
+#                     #     "salinity":s.tolist()[:3] if s is not None else [],
+#                     #     "silicate":silicate.tolist()[:3] if silicate is not None else [],
+#                     #     "phosphate":phosphate.tolist()[:3] if phosphate is not None else [],
+#                     #     "var":profile.var_metadata(1)
+#                     #     })
+#                 except Exception as e:
+#                     print(f"Finished parsing profiles or encountered error: {e}")
+#                     break
+#                     # return profiles, profiles_preview
+        
+#         final_df = pd.concat(profiles, ignore_index=True)
+#         final_df_safe = make_json_safe(final_df)
+#         data = final_df_safe.to_dict(orient='records')
+#         profiles_preview = final_df_safe.head(3).to_dict(orient='records')
+#         print(len(data), len(profiles_preview), type(data), type(profiles_preview))
+#         return data, profiles_preview
+
+#     except Exception as e:
+#         print(f"Exception during WOD parsing: {e}")
+#         return {"error": f"Exception occurred: {e}"}
+
+#     finally:
+#         # 3. Clean up temp file
+#         if os.path.exists(temp_ascii_path):
+#             os.remove(temp_ascii_path)
+
 async def parse_wod_file(file_content: bytes) -> dict:
     """
     Decompresses a WOD .gz file to ASCII, parses profiles with wodpy,
@@ -174,77 +369,38 @@ async def parse_wod_file(file_content: bytes) -> dict:
                 shutil.copyfileobj(f_in, f_out)
 
         # 2. Open ASCII file for parsing
-        profiles_preview = []
         profiles = []
         with open(temp_ascii_path, "r") as fid:
             while True:
                 try:
                     profile = wod.WodProfile(fid)
-                    variables = []
-                    for i in range(len(profile.profile_data)):
-                        variables.append(profile.profile_data[i]["variables"])
-                    oxygen =profile.oxygen()
-                    pH = profile.pH()
-                    p = profile.p()
-                    z = profile.z()
-                    t = profile.t()
-                    s = profile.s()
-                    silicate = profile.silicate()
-                    phosphate = profile.phosphate()
-                    
-                    profiles.append({
-                        "cruise": profile.cruise(),
-                        "latitude": float(profile.latitude()),
-                        "longitude": float(profile.longitude()),
-                        "date": str(profile.datetime()),
-                        "levels": int(profile.n_levels()),
-                        "depths": z.tolist() if z is not None else [],
-                        "biological_header": profile.biological_header,  # if this is a dict, it's safe
-                        "oxygen": oxygen.tolist() if oxygen is not None else [],
-                        "pH": pH.tolist() if pH is not None else [],
-                        "pressure": p.tolist() if p is not None else [],
-                        # "nitrate": variables[:3],  # double-check if variables contain arrays too
-                        "temperatures":t.tolist() if t is not None else [],
-                        "salinity":s.tolist() if s is not None else [],
-                        "silicate":silicate.tolist() if silicate is not None else [],
-                        "phosphate":phosphate.tolist() if phosphate is not None else [],
-                        "var":profile.var_metadata(1)
-                    })
-                    if len(profiles_preview) < 3:
-                        profiles_preview.append({
-                            "cruise": profile.cruise(),
-                        "latitude": float(profile.latitude()),
-                        "longitude": float(profile.longitude()),
-                        "date": str(profile.datetime()),
-                        "levels": int(profile.n_levels()),
-                        "depths": z.tolist()[:3] if z is not None else [],
-                        "biological_header": profile.biological_header,  # if this is a dict, it's safe
-                        "oxygen": oxygen.tolist()[:3] if oxygen is not None else [],
-                        "pH": pH.tolist()[:3] if pH is not None else [],
-                        "pressure": p.tolist()[:3] if p is not None else [],
-                        # "nitrate": variables[:3],  # double-check if variables contain arrays too
-                        "temperatures":t.tolist()[:3] if t is not None else [],
-                        "salinity":s.tolist()[:3] if s is not None else [],
-                        "silicate":silicate.tolist()[:3] if silicate is not None else [],
-                        "phosphate":phosphate.tolist()[:3] if phosphate is not None else [],
-                        "var":profile.var_metadata(1)
-                        })
-                except Exception:
+                    profile_df = _process_single_wod_profile(profile)
+                    if not profile_df.empty:
+                        profiles.append(profile_df)
+                except Exception as e:
+                    print(f"Finished parsing profiles or encountered error: {e}")
                     break
-        
-                
 
-        return profiles, profiles_preview
+        final_df = pd.concat(profiles, ignore_index=True)
+        final_df_safe = final_df.where(pd.notnull(final_df), None)
+        data = final_df_safe.to_dict(orient='records')
+        profiles_preview = final_df_safe.head(3).to_dict(orient='records')
+
+        # --- FLATTEN and MAKE JSON SAFE ---
+        data_flat = [make_json_safe(flatten_record(rec)) for rec in data]
+        preview_flat = [make_json_safe(flatten_record(rec)) for rec in profiles_preview]
+
+        print(len(data_flat), len(preview_flat), type(data_flat), type(preview_flat))
+        return data_flat, preview_flat
 
     except Exception as e:
+        print(f"Exception during WOD parsing: {e}")
         return {"error": f"Exception occurred: {e}"}
 
     finally:
         # 3. Clean up temp file
         if os.path.exists(temp_ascii_path):
             os.remove(temp_ascii_path)
-
-
 
 async def extract_file_metadata(file: UploadFile) -> dict:
     """
