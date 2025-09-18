@@ -353,7 +353,74 @@ def create_mapping_tool(session_id: str):
     
     return submit_mapping_suggestion
 
-# --- Rate limiting helper ---
+def create_merge_suggestion_tool(session_id: str):
+    @tool
+    def suggest_merge_strategy(file_info: List[Dict], strategy_recommendation: str, 
+                              join_columns: Dict[str, str], reasoning: str, 
+                              considerations: str = None) -> str:
+        """
+        Provide merge strategy suggestions to the user based on dataset analysis.
+        
+        Args:
+            file_info: List of file information dictionaries with id, name, and columns
+            strategy_recommendation: str (one of: inner, outer, left, concat)
+            join_columns: Dict mapping file_id to recommended join column name
+            reasoning: str explaining why this strategy and columns are recommended
+            considerations: str optional warnings or things to consider
+        """
+        try:
+            logger.info(f"🔥 MERGE TOOL CALLED for session {session_id}")
+            logger.info(f"🔥 MERGE ARGS: strategy={strategy_recommendation}, join_columns={join_columns}")
+            
+            sess = SESSIONS.get(session_id)
+            if not sess:
+                logger.error(f"❌ Session {session_id} not found")
+                return f"Error: session {session_id} not found"
+
+            mgr = sess.get("manager")
+            if not isinstance(mgr, ConnectionManager):
+                logger.error("❌ No manager found for session")
+                return "Error: no manager found for session"
+
+            # Validate the strategy
+            valid_strategies = ['inner', 'outer', 'left', 'concat']
+            if strategy_recommendation not in valid_strategies:
+                return f"Error: Invalid strategy '{strategy_recommendation}'. Must be one of: {valid_strategies}"
+
+            # Prepare the suggestion payload
+            suggestion_payload = {
+                "strategy": strategy_recommendation,
+                "join_columns": join_columns,
+                "reasoning": reasoning,
+                "considerations": considerations or "",
+                "file_info": file_info
+            }
+
+            message = {
+                "type": "merge_suggestion", 
+                "payload": suggestion_payload
+            }
+            
+            logger.info(f"🔥 About to broadcast merge suggestion: {message}")
+            
+            # Store message in session for debugging
+            sess["last_merge_suggestion"] = message
+            
+            # Broadcast the suggestion
+            mgr.broadcast_sync(message)
+            
+            logger.info(f"✅ Merge suggestion tool completed successfully for session {session_id}")
+            return f"Successfully provided merge strategy recommendation: {strategy_recommendation}"
+            
+        except Exception as e:
+            logger.error(f"❌ Merge suggestion tool failed with error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return f"Error: {e}"
+    
+    return suggest_merge_strategy
+
+# --- Rate limiting helper ---  
 async def wait_for_rate_limit():
     """Ensure we don't exceed API rate limits"""
     global last_request_time
@@ -383,7 +450,11 @@ class AgentClass:
         )
         
         # Create tools
-        self.tools = [create_mapping_tool(session_id),create_analysis_tool(session_id)]
+        self.tools = [
+            create_mapping_tool(session_id),
+            create_analysis_tool(session_id),
+            create_merge_suggestion_tool(session_id)  # <-- Add this line
+        ]
         
         # Create prompt template with shorter system message
         self.prompt = ChatPromptTemplate.from_messages([
@@ -403,7 +474,7 @@ class AgentClass:
             handle_parsing_errors=True,
             max_iterations=2,
             return_intermediate_steps=True,
-            early_stopping_method="generate",  # Stop early to save tokens
+            # early_stopping_method="generate",  # Stop early to save tokens
         )
 
     async def chat(self, prompt: str):
@@ -507,11 +578,11 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict) -> tuple:
     
     try:
         # Basic data validation
-        if x_column not in df.columns:
-            raise ValueError(f"Column '{x_column}' not found in data")
+        # if x_column not in df.columns:
+        #     raise ValueError(f"Column '{x_column}' not found in data")
         
-        if y_column and y_column not in df.columns:
-            raise ValueError(f"Column '{y_column}' not found in data")
+        # if y_column and y_column not in df.columns:
+        #     raise ValueError(f"Column '{y_column}' not found in data")
         
         # Remove any infinite values and convert to numeric where possible
         df_clean = df.copy()
@@ -664,6 +735,9 @@ async def get_analysis_suggestions(session_id: str, source_phase_id: str):
         logger.error(f"Error generating analysis suggestions: {e}")
         return {"error": f"Failed to generate suggestions: {str(e)}"}
 
+
+from fastapi.responses import JSONResponse
+
 # Additional endpoint for statistical summaries
 @app.post("/analysis/statistics")
 async def get_statistical_summary(payload: dict):
@@ -709,7 +783,7 @@ async def get_statistical_summary(payload: dict):
         
         # Calculate comprehensive statistics
         stats_summary = {}
-        
+
         # Numeric columns
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
@@ -717,18 +791,18 @@ async def get_statistical_summary(payload: dict):
             if len(col_data) > 0:
                 stats_summary[col] = {
                     "type": "numeric",
-                    "count": len(col_data),
-                    "mean": float(col_data.mean()),
-                    "std": float(col_data.std()),
-                    "min": float(col_data.min()),
-                    "max": float(col_data.max()),
-                    "median": float(col_data.median()),
-                    "q25": float(col_data.quantile(0.25)),
-                    "q75": float(col_data.quantile(0.75)),
+                    "count": int(col_data.count()),
+                    "mean": make_serializable(col_data.mean()),
+                    "std": make_serializable(col_data.std()),
+                    "min": make_serializable(col_data.min()),
+                    "max": make_serializable(col_data.max()),
+                    "median": make_serializable(col_data.median()),
+                    "q25": make_serializable(col_data.quantile(0.25)),
+                    "q75": make_serializable(col_data.quantile(0.75)),
                     "missing_count": int(df[col].isna().sum()),
-                    "missing_percent": float(df[col].isna().mean() * 100)
+                    "missing_percent": make_serializable(df[col].isna().mean() * 100)
                 }
-        
+
         # Categorical columns
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns
         for col in categorical_cols:
@@ -737,33 +811,36 @@ async def get_statistical_summary(payload: dict):
                 value_counts = col_data.value_counts()
                 stats_summary[col] = {
                     "type": "categorical",
-                    "count": len(col_data),
-                    "unique_count": len(value_counts),
-                    "top_value": str(value_counts.index[0]) if len(value_counts) > 0 else None,
+                    "count": int(col_data.count()),
+                    "unique_count": int(value_counts.nunique()),
+                    "top_value": make_serializable(value_counts.index[0]) if len(value_counts) > 0 else None,
                     "top_count": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
                     "missing_count": int(df[col].isna().sum()),
-                    "missing_percent": float(df[col].isna().mean() * 100)
+                    "missing_percent": make_serializable(df[col].isna().mean() * 100)
                 }
-        
+
         # Correlation matrix for numeric columns
         correlation_matrix = None
         if len(numeric_cols) > 1:
             corr_df = df[numeric_cols].corr()
             correlation_matrix = {
                 "columns": list(corr_df.columns),
-                "matrix": corr_df.values.tolist()
+                "matrix": [[make_serializable(v) for v in row] for row in corr_df.values.tolist()]
             }
-        
-        return {
+
+        # --- FIX: Wrap all returned data with make_serializable ---
+        result = {
             "status": "success",
-            "statistics": stats_summary,
+            "statistics": {k: {kk: make_serializable(vv) for kk, vv in v.items()} for k, v in stats_summary.items()},
             "correlation_matrix": correlation_matrix,
-            "data_shape": {"rows": len(df), "columns": len(df.columns)},
+            "data_shape": {"rows": int(len(df)), "columns": int(len(df.columns))},
             "column_types": {
                 "numeric": list(numeric_cols),
                 "categorical": list(categorical_cols)
             }
         }
+        return JSONResponse(content=result)
+
         
     except Exception as e:
         logger.error(f"Error generating statistical summary: {e}")
@@ -1019,6 +1096,255 @@ import numpy as np
 #         import traceback
 #         logger.error(f"Traceback: {traceback.format_exc()}")
 #         return {"error": f"Failed to generate stats: {str(e)}"}
+
+# Add these new endpoints to your main.py
+
+@app.get("/merge/available/{session_id}")
+async def get_available_files_for_merge(session_id: str):
+    """
+    Get list of files available for merging (those with mappings)
+    Uses the same naming logic as analysis endpoints.
+    """
+    try:
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        available_files = []
+        
+        for upload in uploads:
+            # Only include files that have mappings and are of type 'ingestion'
+            if upload.get('mappings'):
+                mapped_columns = [role for role in upload['mappings'].values() if role != "Ignore"]
+                # Use consistent naming logic
+                name = upload.get('name') or upload.get('filename') or upload.get('original_filename') or f"File_{upload.get('id')}"
+                available_files.append({
+                    'id': upload['id'],
+                    'name': name,
+                    'columns': mapped_columns,
+                    'total_columns': len(mapped_columns),
+                    'has_processed_data': bool(upload.get('processed_data')),
+                    'is_merged': upload.get('is_merged', False)
+                })
+        
+        return {
+            "status": "success",
+            "available_files": available_files,
+            "total_available": len(available_files)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting available files: {e}")
+        return {"error": f"Failed to get available files: {str(e)}"}
+
+
+@app.post("/merge/preview")
+async def merge_preview(payload: dict):
+    """
+    Generate a preview of merged datasets
+    """
+    try:
+        session_id = payload.get("session_id")
+        file_ids = payload.get("file_ids", [])
+        merge_strategy = payload.get("merge_strategy", "inner")
+        join_columns = payload.get("join_columns", {})
+        
+        if len(file_ids) < 2:
+            return {"error": "At least 2 files required for merging"}
+        
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        datasets = []
+        
+        for file_id in file_ids:
+            upload = next((u for u in uploads if u.get('id') == file_id), None)
+            if not upload:
+                return {"error": f"File {file_id} not found"}
+            
+            # Use processed data if available, otherwise original data
+            data = upload.get('processed_data') or upload.get('data')
+            mappings = upload.get('mappings', {})
+            
+            if not data:
+                return {"error": f"No data found for file {file_id}"}
+            
+            df = pd.DataFrame(data)
+            
+            # Apply mappings
+            rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+            df.rename(columns=rename_map, inplace=True)
+            
+            # Drop ignored columns
+            cols_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+            
+            datasets.append({
+                'id': file_id,
+                'name': upload.get('name', f'Dataset_{file_id}'),
+                'df': df
+            })
+        
+        # Perform the merge
+        merged_df = merge_datasets(datasets, merge_strategy, join_columns)
+        
+        # Generate preview with proper serialization
+        preview_data = merged_df.head(10).to_dict('records')
+        clean_preview_data = []
+        for row in preview_data:
+            clean_row = {k: make_serializable(v) for k, v in row.items()}
+            clean_preview_data.append(clean_row)
+        
+        return {
+            "status": "success",
+            "preview": {
+                "total_rows": len(merged_df),
+                "total_columns": len(merged_df.columns),
+                "columns": list(merged_df.columns),
+                "sample_data": clean_preview_data
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in merge preview: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": f"Merge preview failed: {str(e)}"}
+
+@app.post("/merge/execute")
+async def merge_execute(payload: dict):
+    """
+    Execute the merge and create a new merged dataset
+    """
+    try:
+        session_id = payload.get("session_id")
+        file_ids = payload.get("file_ids", [])
+        merge_strategy = payload.get("merge_strategy", "inner")
+        join_columns = payload.get("join_columns", {})
+        
+        if len(file_ids) < 2:
+            return {"error": "At least 2 files required for merging"}
+        
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        datasets = []
+        
+        # Same dataset loading logic as preview
+        for file_id in file_ids:
+            upload = next((u for u in uploads if u.get('id') == file_id), None)
+            if not upload:
+                return {"error": f"File {file_id} not found"}
+            
+            # Use processed data if available, otherwise original data
+            data = upload.get('processed_data') or upload.get('data')
+            mappings = upload.get('mappings', {})
+            
+            if not data:
+                return {"error": f"No data found for file {file_id}"}
+            
+            df = pd.DataFrame(data)
+            
+            # Apply mappings
+            rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+            df.rename(columns=rename_map, inplace=True)
+            
+            # Drop ignored columns
+            cols_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+            
+            datasets.append({
+                'id': file_id,
+                'name': upload.get('name', f'Dataset_{file_id}'),
+                'df': df
+            })
+        
+        # Execute the merge
+        merged_df = merge_datasets(datasets, merge_strategy, join_columns)
+        
+        # Create new merged dataset entry
+        merged_id = str(uuid.uuid4())
+        file_names = [d['name'] for d in datasets]
+        merged_name = f"Merged: {' + '.join(file_names)}"
+        
+        # Convert merged data with proper serialization
+        full_data = merged_df.to_dict('records')
+        clean_full_data = []
+        for row in full_data:
+            clean_row = {k: make_serializable(v) for k, v in row.items()}
+            clean_full_data.append(clean_row)
+        
+        # Sample data for preview
+        sample_data = merged_df.head(100).to_dict('records')
+        clean_sample_data = []
+        for row in sample_data:
+            clean_row = {k: make_serializable(v) for k, v in row.items()}
+            clean_sample_data.append(clean_row)
+        
+        merged_metadata = {
+            'id': merged_id,
+            'type': 'ingestion',  # Keep as ingestion type so it works with existing analysis
+            'name': merged_name,
+            'filename': merged_name,
+            'source_files': file_ids,
+            'merge_strategy': merge_strategy,
+            'join_columns': join_columns,
+            'data': clean_full_data,
+            'sample_data': clean_sample_data,
+            'columns': list(merged_df.columns),
+            'mappings': {col: col for col in merged_df.columns},  # 1:1 mapping since already processed
+            'is_merged': True,
+            'merge_timestamp': time.time()
+        }
+        
+        SESSIONS[session_id]['uploads'].append(merged_metadata)
+        
+        return {
+            "status": "success",
+            "merged_data": merged_metadata
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in merge execution: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": f"Merge execution failed: {str(e)}"}
+
+def merge_datasets(datasets, strategy, join_columns):
+    """
+    Core function to merge datasets based on strategy
+    """
+    dfs = [d['df'] for d in datasets]
+    
+    if strategy == 'concat':
+        # Simple concatenation
+        return pd.concat(dfs, ignore_index=True, sort=False)
+    
+    elif strategy in ['inner', 'outer', 'left']:
+        # Join-based merging
+        result = dfs[0]
+        
+        for i, next_df in enumerate(dfs[1:], 1):
+            left_col = join_columns.get(datasets[0]['id'])
+            right_col = join_columns.get(datasets[i]['id'])
+            
+            if not left_col or not right_col:
+                raise ValueError(f"Join columns not specified for merge")
+            
+            result = result.merge(
+                next_df, 
+                left_on=left_col, 
+                right_on=right_col, 
+                how=strategy,
+                suffixes=('', f'_file{i+1}')
+            )
+        
+        return result
+    
+    else:
+        raise ValueError(f"Unsupported merge strategy: {strategy}")
 
 
 def make_serializable(obj):
@@ -1352,6 +1678,44 @@ Use submit_mapping_suggestion tool with ALL columns. For each column determine:
 User request: "{user_message}"
 """
 
+        elif active_view == 'merge' and payload.get('context', {}).get('type') == 'merge':
+                logger.info(f"🔥 MERGE MODE: processing merge assistance request")
+                
+                selected_files_info = payload.get('context', {}).get('selected_files', [])
+                current_strategy = payload.get('context', {}).get('merge_strategy', 'inner')
+                current_join_columns = payload.get('context', {}).get('join_columns', {})
+                
+                prompt = f"""You are a marine data merging specialist. Analyze these datasets for optimal merging:
+
+            Selected files for merging:
+            {chr(10).join([f"- {f['name']}: columns=[{', '.join(f['columns'])}]" for f in selected_files_info])}
+
+            Current settings:
+            - Merge strategy: {current_strategy}
+            - Join columns: {current_join_columns}
+
+            User request: "{user_message}"
+
+            Based on the column structures and marine science best practices, provide recommendations using the suggest_merge_strategy tool:
+
+            1. Analyze the compatibility of these datasets
+            2. Recommend the best merge strategy:
+            - inner: Keep only matching records (for perfect overlap)
+            - outer: Keep all records, fill missing values (for comprehensive analysis)  
+            - left: Keep all from first file (when first is primary dataset)
+            - concat: Stack vertically (when same structure, different time/space)
+
+            3. Suggest appropriate join columns for each file (if not concat)
+            4. Consider marine science patterns like:
+            - Time series data (Date/Time columns)
+            - Spatial data (Lat/Lon coordinates) 
+            - Depth profiles (Depth measurements)
+            - Station/Sample IDs
+            - Common measurement parameters
+
+            Always use the suggest_merge_strategy tool when providing merge recommendations."""
+            
+
         elif active_view == 'analysis' and active_phase_context:
             # NEW: Use AnalysisAgentClass for analysis requests
             logger.info(f"🔥 ANALYSIS MODE: processing request")
@@ -1372,23 +1736,27 @@ User request: "{user_message}"
                     break
             
             available_columns = []
+            original_columns = []
             if source_upload and source_upload.get('mappings'):
-                available_columns = [role for role in source_upload['mappings'].values() if role != "Ignore"]
-            
+                # Get original columns (keys) and mapped roles (values)
+                original_columns = [col for col, role in source_upload['mappings'].items() if role != "Ignore"]
+                mapped_columns = [role for col, role in source_upload['mappings'].items() if role != "Ignore"]
+
             # Enhanced prompt for analysis
-            prompt = f"""You are analyzing marine science data with these available columns: {available_columns}
+            prompt = f"""You are analyzing marine science data.
+            Here are the available columns for plotting (original column names): {original_columns} {available_columns}
+            Mapped roles for reference: {mapped_columns}
 
-User request: "{user_message}"
+            User request: "{user_message}"
 
-Based on the request, determine the appropriate visualization and use the generate_analysis_and_plot tool with:
-- analysis_type: choose from line, scatter, bar, area, histogram
-- x_column: the column name for x-axis  
-- y_column: the column name for y-axis (if needed)
-- title: descriptive title
-- description: brief analysis description
+            Based on the request, determine the appropriate visualization and use the generate_analysis_and_plot tool with:
+            - analysis_type: choose from line, scatter, bar, area, histogram
+            - x_column: the original column name for x-axis  
+            - y_column: the original column name for y-axis (if needed)
+            - title: descriptive title
+            - description: brief analysis description
 
-Always use the tool when users ask for plots, charts, visualizations, or data analysis."""
-
+            Always use the tool when users ask for plots, charts, visualizations, or data analysis."""
         else:
             # Shortened prompt for general queries
             prompt = f"""Context: {trimmed_context}

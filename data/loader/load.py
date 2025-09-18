@@ -147,24 +147,44 @@ import io
 import pandas as pd
 import math
 
+import pandas as pd
+import numpy as np
+import math
+
 def make_json_safe(obj):
-    """Recursively convert objects to JSON-safe types."""
-    if isinstance(obj, dict):
-        return {k: make_json_safe(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [make_json_safe(v) for v in obj]
-    elif isinstance(obj, (int, str)) or obj is None:
-        return obj
-    elif isinstance(obj, float):
-        if math.isfinite(obj):
+    """Recursively convert objects to JSON-safe types, handling all NaN variants."""
+    try:
+        if isinstance(obj, dict):
+            return {k: make_json_safe(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [make_json_safe(v) for v in obj]
+        elif isinstance(obj, (int, str)) or obj is None:
             return obj
+        elif isinstance(obj, float):
+            # Handle all possible NaN/infinity cases
+            if pd.isna(obj) or math.isnan(obj) or not math.isfinite(obj):
+                return None
+            return obj
+        elif isinstance(obj, np.floating):
+            # Handle numpy float types
+            if pd.isna(obj) or np.isnan(obj) or not np.isfinite(obj):
+                return None
+            return float(obj)
+        elif isinstance(obj, np.integer):
+            # Handle numpy integer types
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            # Handle numpy arrays
+            return [make_json_safe(item) for item in obj.tolist()]
+        elif isinstance(obj, pd.Timestamp):
+            return str(obj)
+        elif isinstance(obj, bytes):
+            return obj.decode(errors="ignore")
+        elif pd.isna(obj):  # Catch any other pandas NA values
+            return None
         else:
-            return None  # convert NaN/inf to None
-    elif isinstance(obj, pd.Timestamp):
-        return str(obj)
-    elif isinstance(obj, bytes):
-        return obj.decode(errors="ignore")
-    else:
+            return str(obj)
+    except Exception as e:
         return str(obj)
 
 async def parse_parquet_file(file_content: bytes) -> tuple:
@@ -208,13 +228,17 @@ async def parse_csv_file(file_content: bytes) -> dict:
             buffer.seek(0) # Reset buffer if gzip fails
             df = pd.read_csv(buffer)
         
+        
         data = df.to_dict(orient='records')
         preview = df.head().to_dict(orient='records')
-        print(f"CSV parsed successfully with {len(data)} rows.")
-        print(f"Prview CSV parsed successfully with {len(preview)} rows.")
+        data_flat = [make_json_safe(flatten_record(rec)) for rec in data]
+        preview_flat = [make_json_safe(flatten_record(rec)) for rec in preview]
+        print(f"CSV parsed successfully with {len(data_flat)} rows.")
+        print(f"Prview CSV parsed successfully with {len(preview_flat)} rows.")
+        
     except Exception as e:
         preview = {"error": f"Could not parse as CSV: {str(e)}"}
-    return data,preview
+    return data_flat,preview_flat
 
 def _process_single_wod_profile(profile: wod.WodProfile) -> pd.DataFrame:
     """
