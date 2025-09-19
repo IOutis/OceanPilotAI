@@ -156,19 +156,19 @@ async def process_analysis_data(payload: dict):
         
         # Use processed data if available, otherwise use original data
         data = source_upload.get('processed_data') or source_upload.get('data')
-        mappings = source_upload.get('mappings', {})
+        # mappings = source_upload.get('mappings', {})
         
         if not data:
             return {"error": "No data found"}
         
         df = pd.DataFrame(data)
-        
+        print("In process_analysis_data, DataFrame columns:", df.columns.tolist())
         # Apply mappings
-        rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-        df.rename(columns=rename_map, inplace=True)
+        # rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
+        # df.rename(columns=rename_map, inplace=True)
         
-        columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
-        df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        # columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+        # df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
         
         # Process the analysis
         processed_data, visualization_config = perform_data_analysis(df, analysis_config)
@@ -472,9 +472,9 @@ class AgentClass:
             tools=self.tools,
             verbose=True,
             handle_parsing_errors=True,
-            max_iterations=2,
+            max_iterations=3,
             return_intermediate_steps=True,
-            # early_stopping_method="generate",  # Stop early to save tokens
+            early_stopping_method="generate",  # Stop early to save tokens
         )
 
     async def chat(self, prompt: str):
@@ -565,52 +565,82 @@ Always use tools when users ask for plots, charts, or data analysis."""),
             early_stopping_method="generate",
         )
 
-def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict) -> tuple:
+def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dict = None) -> tuple:
     """
     Perform the actual data analysis and return processed data and visualization config.
-    
+    Accepts both mapped roles and original column names for x_column/y_column.
     Returns:
         tuple: (processed_data, visualization_config)
     """
-    analysis_type = analysis_config["analysis_type"]
-    x_column = analysis_config["x_column"]
-    y_column = analysis_config.get("y_column")
-    
     try:
-        # Basic data validation
-        # if x_column not in df.columns:
-        #     raise ValueError(f"Column '{x_column}' not found in data")
-        
-        # if y_column and y_column not in df.columns:
-        #     raise ValueError(f"Column '{y_column}' not found in data")
-        
+        print("DataFrame columns:", df.columns.tolist())
+        analysis_type = analysis_config["analysis_type"]
+        x_column = analysis_config["x_column"]
+        y_column = analysis_config.get("y_column")
+
+        # If mappings are not provided, use empty dict
+        mappings = mappings or {}
+
+        # Build mapping: original -> role and role -> original
+        original_to_role = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+        role_to_original = {role: orig for orig, role in mappings.items() if role != "Ignore"}
+
+        # Columns in DataFrame after renaming
+        df_columns = set(df.columns)
+
+        # Map x_column and y_column to actual DataFrame columns
+        def resolve_column(col):
+            # If col is in DataFrame, use it
+            if col in df_columns:
+                return col
+            # If col is a mapped role, use it
+            if col in original_to_role.values() and col in df_columns:
+                return col
+            # If col is an original column name, map to role
+            if col in original_to_role and original_to_role[col] in df_columns:
+                return original_to_role[col]
+            # If col is a role, map to original and check
+            if col in role_to_original and role_to_original[col] in df_columns:
+                return role_to_original[col]
+            return None
+
+        x_col_in_df = resolve_column(x_column)
+        y_col_in_df = resolve_column(y_column) if y_column else None
+
+        missing = []
+        if not x_col_in_df:
+            missing.append(x_column)
+        if y_column and not y_col_in_df:
+            missing.append(y_column)
+        if missing:
+            raise KeyError(missing)
+
         # Remove any infinite values and convert to numeric where possible
         df_clean = df.copy()
-        
+
         # Convert columns to numeric if possible
-        for col in [x_column, y_column] if y_column else [x_column]:
+        for col in [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]:
             if col in df_clean.columns:
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-        
+
         # Remove rows with NaN values in key columns
-        columns_to_check = [x_column, y_column] if y_column else [x_column]
-        df_clean = df_clean.dropna(subset=columns_to_check)
-        
+        # columns_to_check = [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]
+        # df_clean = df_clean.dropna(subset=columns_to_check)
+
         if df_clean.empty:
             raise ValueError("No valid data remaining after cleaning")
-        
+
         visualization_config = {
             "type": analysis_type,
             "config": {
                 "title": analysis_config.get("title", f"{analysis_type.title()} Analysis"),
                 "description": analysis_config.get("description", ""),
-                "xAxis": x_column,
-                "yAxis": y_column,
-                "xAxisLabel": x_column.replace('_', ' ').title(),
-                "yAxisLabel": y_column.replace('_', ' ').title() if y_column else ""
+                "xAxis": x_col_in_df,
+                "yAxis": y_col_in_df,
+                "xAxisLabel": x_col_in_df.replace('_', ' ').title(),
+                "yAxisLabel": y_col_in_df.replace('_', ' ').title() if y_col_in_df else ""
             }
         }
-        
         # Process data based on analysis type
         if analysis_type == "scatter" or analysis_type == "line":
             if not y_column:
@@ -739,6 +769,139 @@ async def get_analysis_suggestions(session_id: str, source_phase_id: str):
 from fastapi.responses import JSONResponse
 
 # Additional endpoint for statistical summaries
+# @app.post("/analysis/statistics")
+# async def get_statistical_summary(payload: dict):
+#     """
+#     Get statistical summary of the processed data
+#     """
+#     try:
+#         session_id = payload.get("session_id")
+#         source_phase_id = payload.get("source_phase_id")
+        
+#         if not all([session_id, source_phase_id]):
+#             return {"error": "Missing required parameters"}
+        
+#         if session_id not in SESSIONS:
+#             return {"error": f"Session {session_id} not found"}
+        
+#         uploads = SESSIONS[session_id].get('uploads', [])
+#         source_upload = None
+        
+#         for upload in uploads:
+#             if upload.get('id') == source_phase_id:
+#                 source_upload = upload
+#                 break
+        
+#         if not source_upload:
+#             return {"error": f"Source phase {source_phase_id} not found"}
+        
+#         # Use processed data if available
+#         data = source_upload.get('processed_data') or source_upload.get('data')
+#         mappings = source_upload.get('mappings', {})
+        
+#         if not data:
+#             return {"error": "No data found"}
+        
+#         df = pd.DataFrame(data)
+        
+#         # Apply mappings
+#         rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
+#         df.rename(columns=rename_map, inplace=True)
+        
+#         columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+#         df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+#         # Calculate comprehensive statistics
+#         stats_summary = {}
+
+#         # Numeric columns
+#         numeric_cols = df.select_dtypes(include=[np.number]).columns
+#         for col in numeric_cols:
+#             col_data = df[col].dropna()
+#             count_val = col_data.count()
+#             if not isinstance(count_val, (np.integer, int, float)):
+#                 count_val = len(col_data)
+#             if len(col_data) > 0:
+#                 stats_summary[col] = {
+#                     "type": "numeric",
+#                     "count": int(count_val),
+#                     "mean": make_serializable(col_data.mean()),
+#                     "std": make_serializable(col_data.std()),
+#                     "min": make_serializable(col_data.min()),
+#                     "max": make_serializable(col_data.max()),
+#                     "median": make_serializable(col_data.median()),
+#                     "q25": make_serializable(col_data.quantile(0.25)),
+#                     "q75": make_serializable(col_data.quantile(0.75)),
+#                     "missing_count": int(df[col].isna().sum()),
+#                     "missing_percent": make_serializable(df[col].isna().mean() * 100)
+#                 }
+
+#         # Categorical columns
+#         categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+#         for col in categorical_cols:
+#             col_data = df[col].dropna()
+#             if len(col_data) > 0:
+#                 value_counts = col_data.value_counts()
+#                 stats_summary[col] = {
+#                     "type": "categorical",
+#                     "count": int(col_data.count()),
+#                     "unique_count": int(value_counts.nunique()),
+#                     "top_value": make_serializable(value_counts.index[0]) if len(value_counts) > 0 else None,
+#                     "top_count": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
+#                     "missing_count": int(df[col].isna().sum()),
+#                     "missing_percent": make_serializable(df[col].isna().mean() * 100)
+#                 }
+
+#         # Correlation matrix for numeric columns
+#         correlation_matrix = None
+#         if len(numeric_cols) > 1:
+#             corr_df = df[numeric_cols].corr()
+#             correlation_matrix = {
+#                 "columns": list(corr_df.columns),
+#                 "matrix": [[make_serializable(v) for v in row] for row in corr_df.values.tolist()]
+#             }
+
+#         # --- FIX: Wrap all returned data with make_serializable ---
+#         result = {
+#             "status": "success",
+#             "statistics": {k: {kk: make_serializable(vv) for kk, vv in v.items()} for k, v in stats_summary.items()},
+#             "correlation_matrix": correlation_matrix,
+#             "data_shape": {"rows": int(len(df)), "columns": int(len(df.columns))},
+#             "column_types": {
+#                 "numeric": list(numeric_cols),
+#                 "categorical": list(categorical_cols)
+#             }
+#         }
+#         return JSONResponse(content=result)
+
+        
+#     except Exception as e:
+#         logger.error(f"Error generating statistical summary: {e}")
+#         import traceback
+#         logger.error(f"Traceback: {traceback.format_exc()}")
+#         return {"error": f"Failed to generate statistics: {str(e)}"}
+def to_scalar(val):
+    """Safely convert pandas/numpy objects to Python scalars for stats."""
+    if isinstance(val, pd.Series):
+        if len(val) == 1:
+            return to_scalar(val.iloc[0])
+        else:
+            return int(len(val))
+    if isinstance(val, np.ndarray):
+        if val.size == 1:
+            return val.item()
+        else:
+            return int(val.size)
+    if hasattr(val, "item") and not isinstance(val, pd.Series):
+        return val.item()
+    try:
+        return int(val)
+    except Exception:
+        try:
+            return float(val)
+        except Exception:
+            return val
+
 @app.post("/analysis/statistics")
 async def get_statistical_summary(payload: dict):
     """
@@ -788,10 +951,13 @@ async def get_statistical_summary(payload: dict):
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             col_data = df[col].dropna()
+            count_val = to_scalar(col_data.count())
+            missing_count = to_scalar(df[col].isna().sum())
+            missing_percent = to_scalar(df[col].isna().mean() * 100)
             if len(col_data) > 0:
                 stats_summary[col] = {
                     "type": "numeric",
-                    "count": int(col_data.count()),
+                    "count": make_serializable(count_val),
                     "mean": make_serializable(col_data.mean()),
                     "std": make_serializable(col_data.std()),
                     "min": make_serializable(col_data.min()),
@@ -799,25 +965,30 @@ async def get_statistical_summary(payload: dict):
                     "median": make_serializable(col_data.median()),
                     "q25": make_serializable(col_data.quantile(0.25)),
                     "q75": make_serializable(col_data.quantile(0.75)),
-                    "missing_count": int(df[col].isna().sum()),
-                    "missing_percent": make_serializable(df[col].isna().mean() * 100)
+                    "missing_count": make_serializable(missing_count),
+                    "missing_percent": make_serializable(missing_percent)
                 }
 
         # Categorical columns
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns
         for col in categorical_cols:
             col_data = df[col].dropna()
-            if len(col_data) > 0:
-                value_counts = col_data.value_counts()
-                stats_summary[col] = {
-                    "type": "categorical",
-                    "count": int(col_data.count()),
-                    "unique_count": int(value_counts.nunique()),
-                    "top_value": make_serializable(value_counts.index[0]) if len(value_counts) > 0 else None,
-                    "top_count": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
-                    "missing_count": int(df[col].isna().sum()),
-                    "missing_percent": make_serializable(df[col].isna().mean() * 100)
-                }
+            value_counts = col_data.value_counts()
+            top_value = value_counts.index[0] if len(value_counts) > 0 else None
+            top_count = to_scalar(value_counts.iloc[0]) if len(value_counts) > 0 else 0
+            unique_count = to_scalar(value_counts.nunique()) if len(value_counts) > 0 else 0
+            count_val = to_scalar(col_data.count())
+            missing_count = to_scalar(df[col].isna().sum())
+            missing_percent = to_scalar(df[col].isna().mean() * 100)
+            stats_summary[col] = {
+                "type": "categorical",
+                "count": make_serializable(count_val),
+                "unique_count": make_serializable(unique_count),
+                "top_value": make_serializable(top_value),
+                "top_count": make_serializable(top_count),
+                "missing_count": make_serializable(missing_count),
+                "missing_percent": make_serializable(missing_percent)
+            }
 
         # Correlation matrix for numeric columns
         correlation_matrix = None
@@ -828,7 +999,6 @@ async def get_statistical_summary(payload: dict):
                 "matrix": [[make_serializable(v) for v in row] for row in corr_df.values.tolist()]
             }
 
-        # --- FIX: Wrap all returned data with make_serializable ---
         result = {
             "status": "success",
             "statistics": {k: {kk: make_serializable(vv) for kk, vv in v.items()} for k, v in stats_summary.items()},
@@ -841,7 +1011,6 @@ async def get_statistical_summary(payload: dict):
         }
         return JSONResponse(content=result)
 
-        
     except Exception as e:
         logger.error(f"Error generating statistical summary: {e}")
         import traceback
@@ -1400,8 +1569,8 @@ async def get_preprocessing_stats(payload: dict):
         
         # Apply the confirmed mappings to rename columns
         # We create a "rename map" from the mappings object
-        rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-        df.rename(columns=rename_map, inplace=True)
+        # rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
+        # df.rename(columns=rename_map, inplace=True)
         
         # Drop the columns that the user marked as "Ignore"
         columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
@@ -1520,8 +1689,8 @@ async def handle_null_imputation(payload: dict):
         df = pd.DataFrame(full_data)
         
         # Apply mappings to rename columns and drop ignored columns
-        rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-        df.rename(columns=rename_map, inplace=True)
+        # rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
+        # df.rename(columns=rename_map, inplace=True)
         
         # Drop ignored columns
         columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
