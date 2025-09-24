@@ -474,7 +474,7 @@ class AgentClass:
             handle_parsing_errors=True,
             max_iterations=3,
             return_intermediate_steps=True,
-            early_stopping_method="generate",  # Stop early to save tokens
+            # early_stopping_method="generate",  # Stop early to save tokens
         )
 
     async def chat(self, prompt: str):
@@ -880,8 +880,13 @@ from fastapi.responses import JSONResponse
 #         import traceback
 #         logger.error(f"Traceback: {traceback.format_exc()}")
 #         return {"error": f"Failed to generate statistics: {str(e)}"}
+# Update the to_scalar helper function
 def to_scalar(val):
     """Safely convert pandas/numpy objects to Python scalars for stats."""
+    if val is None:
+        return None
+    if pd.isna(val):
+        return None
     if isinstance(val, pd.Series):
         if len(val) == 1:
             return to_scalar(val.iloc[0])
@@ -889,18 +894,21 @@ def to_scalar(val):
             return int(len(val))
     if isinstance(val, np.ndarray):
         if val.size == 1:
-            return val.item()
+            return make_serializable(val.item())
         else:
             return int(val.size)
     if hasattr(val, "item") and not isinstance(val, pd.Series):
-        return val.item()
+        return make_serializable(val.item())
+    # Handle NaN and inf values
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
     try:
         return int(val)
     except Exception:
         try:
-            return float(val)
+            return float(val) if not (isinstance(val, float) and (math.isnan(val) or math.isinf(val))) else None
         except Exception:
-            return val
+            return make_serializable(val)
 
 @app.post("/analysis/statistics")
 async def get_statistical_summary(payload: dict):
@@ -1516,30 +1524,128 @@ def merge_datasets(datasets, strategy, join_columns):
         raise ValueError(f"Unsupported merge strategy: {strategy}")
 
 
-def make_serializable(obj):
-    """Convert pandas/numpy objects to JSON-serializable types"""
-    # Handle Series objects first
+import pandas as pd
+import numpy as np
+from typing import Any, Union, List, Dict
+import math
+
+def make_serializable(obj: Any) -> Any:
+    """
+    Convert pandas/numpy objects to JSON-serializable types with comprehensive handling
+    """
+    # Handle None first
+    if obj is None:
+        return None
+    
+    # Handle pandas Series
     if isinstance(obj, pd.Series):
         if len(obj) == 1:
             return make_serializable(obj.iloc[0])
         else:
-            return [make_serializable(item) for item in obj]
+            return [make_serializable(item) for item in obj.tolist()]
     
-    # Handle scalar pandas NA values
-    if pd.isna(obj):
+    # Handle pandas Index
+    if isinstance(obj, pd.Index):
+        return [make_serializable(item) for item in obj.tolist()]
+    
+    # Handle numpy arrays
+    if isinstance(obj, np.ndarray):
+        return [make_serializable(item) for item in obj.tolist()]
+    
+    # Handle pandas NA/NaT and numpy NaN
+    if pd.isna(obj) or (isinstance(obj, float) and math.isnan(obj)):
         return None
-    elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
+    
+    # Handle pandas Timestamp and datetime objects
+    if isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
         return str(obj)
-    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+    
+    # Handle numpy integer types
+    if isinstance(obj, (np.integer, np.int8, np.int16, np.int32, np.int64, 
+                       np.uint8, np.uint16, np.uint32, np.uint64)):
         return int(obj)
-    elif isinstance(obj, (np.floating, np.float64, np.float32)):
-        return float(obj) if not np.isnan(obj) else None
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif hasattr(obj, 'item'):  # numpy scalars
-        return obj.item()
-    else:
+    
+    # Handle numpy float types (including checking for NaN/inf)
+    if isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+    
+    # Handle numpy bool
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    
+    # Handle numpy complex (convert to string representation)
+    if isinstance(obj, np.complex128):
+        return str(obj)
+    
+    # Handle regular Python float (check for NaN/inf)
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
         return obj
+    
+    # Handle lists and tuples recursively
+    if isinstance(obj, (list, tuple)):
+        return [make_serializable(item) for item in obj]
+    
+    # Handle dictionaries recursively
+    if isinstance(obj, dict):
+        return {str(k): make_serializable(v) for k, v in obj.items()}
+    
+    # Handle objects with .item() method (numpy scalars)
+    if hasattr(obj, 'item') and callable(getattr(obj, 'item')):
+        try:
+            return make_serializable(obj.item())
+        except (ValueError, TypeError):
+            return str(obj)
+    
+    # Handle objects with .tolist() method
+    if hasattr(obj, 'tolist') and callable(getattr(obj, 'tolist')):
+        try:
+            return make_serializable(obj.tolist())
+        except (ValueError, TypeError):
+            return str(obj)
+    
+    # For basic Python types, return as-is
+    if isinstance(obj, (int, str, bool)):
+        return obj
+    
+    # Last resort: convert to string
+    return str(obj)
+
+def safe_df_to_records(df: pd.DataFrame) -> List[Dict]:
+    """
+    Safely convert DataFrame to records with proper serialization
+    """
+    if df.empty:
+        return []
+    
+    # Replace inf and -inf with None before conversion
+    df_clean = df.replace([np.inf, -np.inf], np.nan)
+    
+    # Convert to records
+    records = df_clean.to_dict('records')
+    
+    # Apply make_serializable to each record
+    serialized_records = []
+    for record in records:
+        serialized_record = {}
+        for key, value in record.items():
+            serialized_record[str(key)] = make_serializable(value)
+        serialized_records.append(serialized_record)
+    
+    return serialized_records
+
+# Alternative helper function for column info serialization
+def serialize_column_info(info_dict: Dict) -> Dict:
+    """
+    Safely serialize column information dictionaries
+    """
+    serialized = {}
+    for key, value in info_dict.items():
+        serialized[str(key)] = make_serializable(value)
+    return serialized
 
 # Replace the stats calculation section in your get_preprocessing_stats function
 @app.post("/preprocess/stats")
@@ -1783,6 +1889,662 @@ async def handle_null_imputation(payload: dict):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {"error": f"Failed to process null imputation: {str(e)}"}
+
+# Add these additional imports to your main.py file (some may already exist)
+from typing import List, Dict, Any, Optional, Union
+from pydantic import BaseModel, Field
+from fastapi import Query
+import re
+from datetime import datetime
+import operator
+import io
+
+# Pydantic models for request/response validation
+class FilterCondition(BaseModel):
+    column: str
+    operator: str = Field(..., description="eq, ne, gt, gte, lt, lte, contains, starts_with, ends_with, in, not_in, is_null, not_null, between")
+    value: Optional[Union[str, int, float, List[Union[str, int, float]]]] = None
+    case_sensitive: bool = False
+
+class DataPlaygroundRequest(BaseModel):
+    session_id: str
+    source_phase_id: str
+    filters: List[FilterCondition] = []
+    search_term: Optional[str] = None
+    search_columns: Optional[List[str]] = None
+    sort_column: Optional[str] = None
+    sort_order: str = Field(default="asc", description="asc or desc")
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=1000)
+    columns: Optional[List[str]] = None  # Select specific columns
+    group_by: Optional[str] = None
+    aggregate_functions: Optional[Dict[str, str]] = None  # {"column": "function"}
+
+class ColumnInfo(BaseModel):
+    name: str
+    data_type: str
+    unique_values: int
+    null_count: int
+    null_percentage: float
+    sample_values: List[Any]
+    is_numeric: bool
+    is_datetime: bool
+    min_value: Optional[Any] = None
+    max_value: Optional[Any] = None
+    mean_value: Optional[float] = None
+
+@app.get("/playground/{session_id}/{source_phase_id}/info")
+async def get_data_info(session_id: str, source_phase_id: str):
+    """Get comprehensive information about the dataset"""
+    try:
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        # Use processed data if available, otherwise use original data
+        data = source_upload.get('data')
+        # mappings = source_upload.get('mappings', {})
+        
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        print(df.columns)
+        
+        # Apply column mappings and filtering
+        # if mappings:
+        #     columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+        #     df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+        # Generate column information
+        column_info = []
+        for col in df.columns:
+            col_data = df[col]
+            is_numeric = pd.api.types.is_numeric_dtype(col_data)
+            is_datetime = pd.api.types.is_datetime64_any_dtype(col_data)
+            
+            info = ColumnInfo(
+                name=col,
+                data_type=str(col_data.dtype),
+                unique_values=int(col_data.nunique()),
+                null_count=int(col_data.isnull().sum()),
+                null_percentage=float(col_data.isnull().mean() * 100),
+                sample_values=[make_serializable(v) for v in col_data.dropna().unique()[:10].tolist()],
+                is_numeric=is_numeric,
+                is_datetime=is_datetime
+            )
+            
+            if is_numeric:
+                info.min_value = make_serializable(col_data.min())
+                info.max_value = make_serializable(col_data.max())
+                info.mean_value = make_serializable(col_data.mean())
+            elif is_datetime:
+                info.min_value = make_serializable(col_data.min())
+                info.max_value = make_serializable(col_data.max())
+            
+            column_info.append(info.dict())
+        
+        return {
+            "status": "success",
+            "dataset_info": {
+                "total_rows": len(df),
+                "total_columns": len(df.columns),
+                "column_info": column_info,
+                # "memory_usage": df.memory_usage(deep=True).sum(),
+                # "dtypes_summary": df.dtypes.value_counts().to_dict()
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting data info: {e}")
+        return {"error": f"Failed to get data info: {str(e)}"}
+
+@app.post("/playground/data")
+async def get_filtered_data(request: DataPlaygroundRequest):
+    """Main data playground endpoint with comprehensive filtering and exploration"""
+    try:
+        session_id = request.session_id
+        source_phase_id = request.source_phase_id
+        
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        # Use processed data if available, otherwise use original data
+        data = source_upload.get('data')
+        # mappings = source_upload.get('mappings', {})
+        
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        original_count = len(df)
+        
+        # Apply column mappings
+        # if mappings:
+        #     columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+        #     df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+        # Apply filters
+        for filter_condition in request.filters:
+            df = apply_filter(df, filter_condition)
+        
+        # Apply global search
+        if request.search_term:
+            df = apply_search(df, request.search_term, request.search_columns)
+        
+        filtered_count = len(df)
+        
+        # Apply column selection
+        if request.columns:
+            available_columns = [col for col in request.columns if col in df.columns]
+            if available_columns:
+                df = df[available_columns]
+        
+        # Apply grouping and aggregation
+        if request.group_by and request.group_by in df.columns:
+            df = apply_grouping(df, request.group_by, request.aggregate_functions)
+        
+        # Apply sorting
+        if request.sort_column and request.sort_column in df.columns:
+            ascending = request.sort_order.lower() == "asc"
+            df = df.sort_values(by=request.sort_column, ascending=ascending, na_position='last')
+        
+        # Apply pagination
+        offset = (request.page - 1) * request.page_size
+        total_pages = (len(df) + request.page_size - 1) // request.page_size
+        paginated_df = df.iloc[offset:offset + request.page_size]
+        
+        # Convert to serializable format using safe method
+        data_records = safe_df_to_records(paginated_df)
+        
+        return {
+            "status": "success",
+            "data": data_records,
+            "pagination": {
+                "current_page": request.page,
+                "page_size": request.page_size,
+                "total_rows": len(df),
+                "total_pages": total_pages,
+                "has_next": request.page < total_pages,
+                "has_previous": request.page > 1,
+                "showing_from": offset + 1 if len(df) > 0 else 0,
+                "showing_to": min(offset + request.page_size, len(df))
+            },
+            "summary": {
+                "original_count": original_count,
+                "filtered_count": filtered_count,
+                "columns_shown": list(paginated_df.columns) if not paginated_df.empty else [],
+                "filters_applied": len(request.filters),
+                "search_applied": bool(request.search_term)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in data playground: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": f"Failed to filter data: {str(e)}"}
+
+def safe_df_to_records(df: pd.DataFrame) -> List[Dict]:
+    """Safely convert DataFrame to records using existing make_serializable function"""
+    records = df.to_dict('records')
+    return [make_serializable(record) for record in records]
+
+def apply_filter(df: pd.DataFrame, filter_condition: FilterCondition) -> pd.DataFrame:
+    """Apply a single filter condition to the dataframe"""
+    column = filter_condition.column
+    op = filter_condition.operator
+    value = filter_condition.value
+    case_sensitive = filter_condition.case_sensitive
+    
+    if column not in df.columns:
+        logger.warning(f"Column {column} not found in dataframe")
+        return df
+    
+    col_data = df[column]
+    
+    try:
+        if op == "eq":
+            return df[col_data == value]
+        elif op == "ne":
+            return df[col_data != value]
+        elif op == "gt":
+            return df[col_data > value]
+        elif op == "gte":
+            return df[col_data >= value]
+        elif op == "lt":
+            return df[col_data < value]
+        elif op == "lte":
+            return df[col_data <= value]
+        elif op == "contains":
+            if case_sensitive:
+                return df[col_data.astype(str).str.contains(str(value), na=False)]
+            else:
+                return df[col_data.astype(str).str.contains(str(value), case=False, na=False)]
+        elif op == "starts_with":
+            if case_sensitive:
+                return df[col_data.astype(str).str.startswith(str(value), na=False)]
+            else:
+                return df[col_data.astype(str).str.lower().str.startswith(str(value).lower(), na=False)]
+        elif op == "ends_with":
+            if case_sensitive:
+                return df[col_data.astype(str).str.endswith(str(value), na=False)]
+            else:
+                return df[col_data.astype(str).str.lower().str.endswith(str(value).lower(), na=False)]
+        elif op == "in":
+            if isinstance(value, list):
+                return df[col_data.isin(value)]
+            else:
+                return df[col_data == value]
+        elif op == "not_in":
+            if isinstance(value, list):
+                return df[~col_data.isin(value)]
+            else:
+                return df[col_data != value]
+        elif op == "is_null":
+            return df[col_data.isnull()]
+        elif op == "not_null":
+            return df[col_data.notnull()]
+        elif op == "between":
+            if isinstance(value, list) and len(value) == 2:
+                return df[(col_data >= value[0]) & (col_data <= value[1])]
+            else:
+                logger.warning(f"Between filter requires list of 2 values, got: {value}")
+                return df
+        else:
+            logger.warning(f"Unknown operator: {op}")
+            return df
+            
+    except Exception as e:
+        logger.error(f"Error applying filter {op} to column {column}: {e}")
+        return df
+
+def apply_search(df: pd.DataFrame, search_term: str, search_columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """Apply global search across specified columns or all text columns"""
+    if not search_term.strip():
+        return df
+    
+    search_cols = search_columns if search_columns else df.select_dtypes(include=['object', 'string']).columns.tolist()
+    search_cols = [col for col in search_cols if col in df.columns]
+    
+    if not search_cols:
+        return df
+    
+    # Create a mask for rows that match the search term
+    mask = pd.Series([False] * len(df), index=df.index)
+    
+    for col in search_cols:
+        try:
+            col_mask = df[col].astype(str).str.contains(search_term, case=False, na=False)
+            mask = mask | col_mask
+        except Exception as e:
+            logger.warning(f"Error searching in column {col}: {e}")
+            continue
+    
+    return df[mask]
+
+def apply_grouping(df: pd.DataFrame, group_by: str, aggregate_functions: Optional[Dict[str, str]] = None) -> pd.DataFrame:
+    """Apply grouping and aggregation"""
+    if group_by not in df.columns:
+        return df
+    
+    if not aggregate_functions:
+        # Default aggregation - count
+        return df.groupby(group_by).size().reset_index(name='count')
+    
+    # Apply specified aggregations
+    agg_dict = {}
+    for col, func in aggregate_functions.items():
+        if col in df.columns:
+            if func in ['sum', 'mean', 'median', 'min', 'max', 'std', 'count']:
+                agg_dict[col] = func
+            else:
+                logger.warning(f"Unknown aggregation function: {func}")
+    
+    if agg_dict:
+        try:
+            return df.groupby(group_by).agg(agg_dict).reset_index()
+        except Exception as e:
+            logger.error(f"Error in grouping: {e}")
+            return df.groupby(group_by).size().reset_index(name='count')
+    
+    return df
+
+@app.get("/playground/{session_id}/{source_phase_id}/column/{column_name}/values")
+async def get_column_unique_values(
+    session_id: str, 
+    source_phase_id: str, 
+    column_name: str,
+    limit: int = Query(default=100, le=1000),
+    search: Optional[str] = Query(default=None)
+):
+    """Get unique values for a specific column (useful for filter dropdowns)"""
+    try:
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        data = source_upload.get('processed_data') or source_upload.get('data')
+        mappings = source_upload.get('mappings', {})
+        
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        
+        # Apply mappings
+        if mappings:
+            columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+            df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+        if column_name not in df.columns:
+            return {"error": f"Column {column_name} not found"}
+        
+        # Get unique values
+        unique_values = df[column_name].dropna().unique()
+        
+        # Apply search filter if provided
+        if search:
+            search_lower = search.lower()
+            unique_values = [v for v in unique_values if search_lower in str(v).lower()]
+        
+        # Limit results and serialize safely
+        limited_values = unique_values[:limit]
+        serialized_values = [make_serializable(v) for v in limited_values]
+        
+        return {
+            "status": "success",
+            "column": column_name,
+            "values": serialized_values,
+            "total_unique": len(unique_values),
+            "showing": len(serialized_values)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting column values: {e}")
+        return {"error": f"Failed to get column values: {str(e)}"}
+
+@app.post("/playground/export")
+async def export_filtered_data(request: DataPlaygroundRequest, 
+                              export_format: str = Query(default="csv", description="csv, json, excel")):
+    """Export filtered data in various formats"""
+    try:
+        # Get filtered data (reuse the same logic as get_filtered_data but without pagination)
+        request.page_size = 10000  # Large page size for export
+        request.page = 1
+        
+        result = await get_filtered_data(request)
+        
+        if result.get("status") != "success":
+            return result
+        
+        df_data = result["data"]
+        df = pd.DataFrame(df_data)
+        
+        if export_format == "csv":
+            csv_buffer = io.StringIO()
+            df.to_csv(csv_buffer, index=False)
+            return {
+                "status": "success",
+                "data": csv_buffer.getvalue(),
+                "filename": f"filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "content_type": "text/csv"
+            }
+        elif export_format == "json":
+            return {
+                "status": "success",
+                "data": df.to_json(orient='records', indent=2),
+                "filename": f"filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                "content_type": "application/json"
+            }
+        elif export_format == "excel":
+            excel_buffer = io.BytesIO()
+            df.to_excel(excel_buffer, index=False, engine='openpyxl')
+            excel_data = excel_buffer.getvalue()
+            import base64
+            return {
+                "status": "success",
+                "data": base64.b64encode(excel_data).decode(),
+                "filename": f"filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "encoding": "base64"
+            }
+        else:
+            return {"error": f"Unsupported export format: {export_format}"}
+    
+    except Exception as e:
+        logger.error(f"Error exporting data: {e}")
+        return {"error": f"Failed to export data: {str(e)}"}
+
+# Additional helpful endpoints for the data playground
+
+@app.get("/playground/{session_id}/{source_phase_id}/summary")
+async def get_data_summary(session_id: str, source_phase_id: str):
+    """Get a quick statistical summary of the dataset"""
+    try:
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        data = source_upload.get('processed_data') or source_upload.get('data')
+        mappings = source_upload.get('mappings', {})
+        
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        
+        # Apply mappings
+        if mappings:
+            columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+            df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+        # Calculate summary statistics
+        summary = {
+            "total_rows": len(df),
+            "total_columns": len(df.columns),
+            "memory_usage_mb": make_serializable(df.memory_usage(deep=True).sum() / 1024 / 1024),
+            "columns": []
+        }
+        
+        for col in df.columns:
+            col_data = df[col]
+            col_summary = {
+                "name": col,
+                "dtype": str(col_data.dtype),
+                "non_null_count": int(col_data.count()),
+                "null_count": int(col_data.isnull().sum()),
+                "null_percentage": make_serializable(col_data.isnull().mean() * 100),
+                "unique_count": int(col_data.nunique()),
+                "is_numeric": pd.api.types.is_numeric_dtype(col_data),
+                "is_datetime": pd.api.types.is_datetime64_any_dtype(col_data)
+            }
+            
+            if col_summary["is_numeric"]:
+                col_summary.update({
+                    "min": make_serializable(col_data.min()),
+                    "max": make_serializable(col_data.max()),
+                    "mean": make_serializable(col_data.mean()),
+                    "std": make_serializable(col_data.std())
+                })
+            
+            summary["columns"].append(col_summary)
+        
+        return {"status": "success", "summary": summary}
+        
+    except Exception as e:
+        logger.error(f"Error getting data summary: {e}")
+        return {"error": f"Failed to get data summary: {str(e)}"}
+
+@app.post("/playground/validate_filters")
+async def validate_filters(request: dict):
+    """Validate filter conditions before applying them"""
+    try:
+        session_id = request.get("session_id")
+        source_phase_id = request.get("source_phase_id")
+        filters = request.get("filters", [])
+        
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        data = source_upload.get('processed_data') or source_upload.get('data')
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        validation_results = []
+        
+        for filter_data in filters:
+            result = {
+                "filter": filter_data,
+                "valid": True,
+                "errors": [],
+                "warnings": []
+            }
+            
+            column = filter_data.get("column")
+            operator = filter_data.get("operator")
+            value = filter_data.get("value")
+            
+            # Validate column exists
+            if column not in df.columns:
+                result["valid"] = False
+                result["errors"].append(f"Column '{column}' not found")
+            else:
+                col_data = df[column]
+                
+                # Validate operator for column type
+                if operator in ["gt", "gte", "lt", "lte", "between"] and not pd.api.types.is_numeric_dtype(col_data):
+                    result["warnings"].append(f"Numeric comparison on non-numeric column '{column}'")
+                
+                # Validate value format
+                if operator == "between" and not isinstance(value, list):
+                    result["valid"] = False
+                    result["errors"].append("'between' operator requires a list of 2 values")
+                elif operator == "between" and isinstance(value, list) and len(value) != 2:
+                    result["valid"] = False
+                    result["errors"].append("'between' operator requires exactly 2 values")
+                elif operator in ["in", "not_in"] and not isinstance(value, list):
+                    result["warnings"].append("'in'/'not_in' operators work best with lists")
+            
+            validation_results.append(result)
+        
+        return {"status": "success", "validations": validation_results}
+        
+    except Exception as e:
+        logger.error(f"Error validating filters: {e}")
+        return {"error": f"Failed to validate filters: {str(e)}"}
+
+@app.get("/playground/{session_id}/{source_phase_id}/sample")
+async def get_data_sample(
+    session_id: str, 
+    source_phase_id: str,
+    sample_size: int = Query(default=10, ge=1, le=1000),
+    random_sample: bool = Query(default=False)
+):
+    """Get a sample of the data for quick preview"""
+    try:
+        if session_id not in SESSIONS:
+            return {"error": f"Session {session_id} not found"}
+        
+        uploads = SESSIONS[session_id].get('uploads', [])
+        source_upload = None
+        
+        for upload in uploads:
+            if upload.get('id') == source_phase_id:
+                source_upload = upload
+                break
+        
+        if not source_upload:
+            return {"error": f"Source phase {source_phase_id} not found"}
+        
+        data = source_upload.get('processed_data') or source_upload.get('data')
+        mappings = source_upload.get('mappings', {})
+        
+        if not data:
+            return {"error": "No data found"}
+        
+        df = pd.DataFrame(data)
+        
+        # Apply mappings
+        if mappings:
+            columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
+            df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+        
+        # Get sample
+        if random_sample and len(df) > sample_size:
+            sample_df = df.sample(n=sample_size, random_state=42)
+        else:
+            sample_df = df.head(sample_size)
+        
+        # Convert to safe records
+        sample_data = safe_df_to_records(sample_df)
+        
+        return {
+            "status": "success",
+            "sample_data": sample_data,
+            "sample_size": len(sample_data),
+            "total_rows": len(df),
+            "columns": list(sample_df.columns),
+            "is_random": random_sample and len(df) > sample_size
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting data sample: {e}")
+        return {"error": f"Failed to get data sample: {str(e)}"}
+
 
 @app.post("/chat")
 async def chat_handler(payload: dict, background_tasks: BackgroundTasks):
