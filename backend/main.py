@@ -34,6 +34,7 @@ load_dotenv()
 from data.loader.load import extract_file_metadata
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+URI = os.getenv("URI", "http://localhost:8000")
 
 app = FastAPI()
 
@@ -252,12 +253,12 @@ def create_analysis_tool(session_id: str):
             
             # Call the analysis processing function
             try:
-                response = requests.post('http://localhost:8000/analysis/process', 
-                    json={
-                        "session_id": session_id,
-                        "source_phase_id": source_phase_id,
-                        "analysis_config": analysis_config
-                    })
+                response = requests.post(f'{URI}/analysis/process', 
+                         json={
+                             "session_id": session_id,
+                             "source_phase_id": source_phase_id,
+                             "analysis_config": analysis_config
+                         })
                 
                 if response.status_code == 200:
                     result = response.json()
@@ -1105,12 +1106,12 @@ def create_analysis_tool(session_id: str):
             
             # Call the analysis processing function
             try:
-                response = requests.post('http://localhost:8000/analysis/process', 
-                    json={
-                        "session_id": session_id,
-                        "source_phase_id": source_phase_id,
-                        "analysis_config": analysis_config
-                    })
+                response = requests.post(f'{URI}/analysis/process', 
+                         json={
+                             "session_id": session_id,
+                             "source_phase_id": source_phase_id,
+                             "analysis_config": analysis_config
+                         })
                 
                 if response.status_code == 200:
                     result = response.json()
