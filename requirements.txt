@@ -29,6 +29,7 @@ googleapis-common-protos==1.70.0
 greenlet==3.2.4
 grpcio==1.74.0
 grpcio-status==1.71.2
+gunicorn==23.0.0
 h11==0.16.0
 h5py==3.14.0
 httpcore==1.0.9
@@ -88,6 +89,7 @@ rich==14.1.0
 rich-toolkit==0.15.1
 rignore==0.6.4
 rsa==4.9.1
+scipy==1.16.2
 sentry-sdk==2.37.1
 shapely==2.1.1
 shellingham==1.5.4
@@ -104,6 +106,7 @@ typing-inspection==0.4.1
 typing_extensions==4.15.0
 tzdata==2025.2
 ujson==5.11.0
+unicorn==2.1.4
 uritemplate==4.2.0
 urllib3==2.5.0
 uvicorn==0.35.0
