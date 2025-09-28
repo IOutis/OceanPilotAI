@@ -131,7 +131,7 @@ _global_manager = manager
 @app.post("/analysis/process")
 async def process_analysis_data(payload: dict):
     """
-    Process analysis data and return visualization-ready data
+    Process analysis data and return visualization-ready data with insights
     """
     try:
         session_id = payload.get("session_id")
@@ -157,7 +157,7 @@ async def process_analysis_data(payload: dict):
         
         # Use processed data if available, otherwise use original data
         data = source_upload.get('processed_data') or source_upload.get('data')
-        # mappings = source_upload.get('mappings', {})
+        mappings = source_upload.get('mappings', {})
         
         if not data:
             return {"error": "No data found"}
@@ -165,14 +165,15 @@ async def process_analysis_data(payload: dict):
         df = pd.DataFrame(data)
         print("In process_analysis_data, DataFrame columns:", df.columns.tolist())
        
-        
-        # Process the analysis
-        processed_data, visualization_config = perform_data_analysis(df, analysis_config)
+        # Process the analysis with enhanced insights
+        processed_data, visualization_config, statistical_summary, insights = perform_data_analysis(df, analysis_config, mappings)
         
         return {
             "status": "success",
             "data": processed_data,
-            "config": visualization_config
+            "config": visualization_config,
+            "statistical_summary": statistical_summary,
+            "insights": insights
         }
         
     except Exception as e:
@@ -180,6 +181,8 @@ async def process_analysis_data(payload: dict):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {"error": f"Failed to process analysis: {str(e)}"}
+
+# Replace the existing create_analysis_tool function with this:
 
 def create_analysis_tool(session_id: str):
     @tool
@@ -190,13 +193,14 @@ def create_analysis_tool(session_id: str):
         
         Args:
             analysis_type: str (one of: line, scatter, bar, area, histogram, correlation_matrix)
-            x_column: str (name of the x-axis column)
-            y_column: str (name of the y-axis column, optional for some plot types)
+            x_column: str (name of the x-axis column - can be original name or role)
+            y_column: str (name of the y-axis column - can be original name or role, optional for some plot types)
             title: str (title for the visualization)
             description: str (description of the analysis findings)
         """
         try:
             logger.info(f"🔥 ANALYSIS TOOL CALLED: {analysis_type} for session {session_id}")
+            logger.info(f"🔥 ANALYSIS COLUMNS: x={x_column}, y={y_column}")
             
             sess = SESSIONS.get(session_id)
             if not sess:
@@ -212,7 +216,6 @@ def create_analysis_tool(session_id: str):
             pending_analysis = sess.get("pending_analysis")
             source_phase_id = None
             
-            # Find the active phase or use the most recent upload
             if pending_analysis:
                 source_phase_id = pending_analysis.get("source_phase_id")
             else:
@@ -224,7 +227,21 @@ def create_analysis_tool(session_id: str):
             if not source_phase_id:
                 return "Error: No data source found for analysis"
             
-            # Process the analysis data
+            # Find the source upload to get mappings
+            uploads = sess.get('uploads', [])
+            source_upload = None
+            for upload in uploads:
+                if upload.get('id') == source_phase_id:
+                    source_upload = upload
+                    break
+            
+            if not source_upload:
+                return "Error: Source upload not found"
+            
+            # Get mappings for better column resolution
+            mappings = source_upload.get('mappings', {})
+            
+            # Process the analysis data with mappings
             analysis_config = {
                 "analysis_type": analysis_type,
                 "x_column": x_column,
@@ -234,11 +251,7 @@ def create_analysis_tool(session_id: str):
             }
             
             # Call the analysis processing function
-            import asyncio
-            import requests
-            
             try:
-                # Make a synchronous call to our analysis processing endpoint
                 response = requests.post('http://localhost:8000/analysis/process', 
                     json={
                         "session_id": session_id,
@@ -249,17 +262,42 @@ def create_analysis_tool(session_id: str):
                 if response.status_code == 200:
                     result = response.json()
                     if result.get("status") == "success":
-                        # Send the processed data and config to frontend
+                        # Send the processed data and config to frontend WITH insights
                         analysis_result = {
                             "type": "analysis_result",
                             "payload": {
                                 "analysis_type": analysis_type,
                                 "data": result["data"],
-                                "config": result["config"]
+                                "config": result["config"],
+                                "statistical_summary": result.get("statistical_summary", {}),
+                                "insights": result.get("insights", [])
                             }
                         }
                         mgr.broadcast_sync(analysis_result)
-                        return f"Successfully generated {analysis_type} visualization"
+                        
+                        # Return structured data for LLM to interpret
+                        config = result["config"]
+                        insights = result.get("insights", [])
+                        stats = result.get("statistical_summary", {})
+                        data_count = len(result.get("data", []))
+                        
+                        x_actual = config.get("xAxis", x_column)
+                        y_actual = config.get("yAxis", y_column)
+                        
+                        # Format the statistical results for the LLM
+                        stats_text = format_stats_for_llm(stats, analysis_type)
+                        insights_text = "\n".join([f"- {insight}" for insight in insights]) if insights else "- No automated insights generated"
+                        
+                        # Return structured information for the LLM to interpret
+                        return f"""I've successfully created a {analysis_type} plot with {data_count} data points showing {x_actual} vs {y_actual}.
+
+STATISTICAL RESULTS:
+{stats_text}
+
+AUTOMATED INSIGHTS:
+{insights_text}
+
+Based on these statistical results, let me explain what this plot reveals about your marine science data and its significance."""
                     else:
                         return f"Error processing analysis: {result.get('error', 'Unknown error')}"
                 else:
@@ -276,6 +314,61 @@ def create_analysis_tool(session_id: str):
             return f"Error: {e}"
     
     return generate_analysis_and_plot
+
+def format_stats_for_llm(stats, analysis_type):
+    """Format statistical results for LLM interpretation"""
+    if not stats:
+        return "No statistical summary available"
+    
+    formatted = []
+    
+    # Format based on analysis type
+    if analysis_type == "scatter":
+        if "correlation" in stats:
+            formatted.append(f"Correlation coefficient: {stats['correlation']:.4f}")
+        if "p_value" in stats:
+            formatted.append(f"P-value: {stats['p_value']:.4f}")
+        if "sample_size" in stats:
+            formatted.append(f"Sample size: {stats['sample_size']}")
+        if "x_mean" in stats and "y_mean" in stats:
+            formatted.append(f"Mean values: X={stats['x_mean']:.3f}, Y={stats['y_mean']:.3f}")
+        if "x_range" in stats and "y_range" in stats:
+            x_min, x_max = stats['x_range']
+            y_min, y_max = stats['y_range']
+            formatted.append(f"Data ranges: X=[{x_min:.3f} to {x_max:.3f}], Y=[{y_min:.3f} to {y_max:.3f}]")
+    
+    elif analysis_type == "histogram":
+        if "mean" in stats:
+            formatted.append(f"Mean: {stats['mean']:.3f}")
+        if "median" in stats:
+            formatted.append(f"Median: {stats['median']:.3f}")
+        if "std_dev" in stats:
+            formatted.append(f"Standard deviation: {stats['std_dev']:.3f}")
+        if "skewness" in stats:
+            formatted.append(f"Skewness: {stats['skewness']:.3f}")
+        if "range" in stats and isinstance(stats['range'], list):
+            formatted.append(f"Range: {stats['range'][0]:.3f} to {stats['range'][1]:.3f}")
+        if "quartiles" in stats:
+            q1, q2, q3 = stats['quartiles']
+            formatted.append(f"Quartiles: Q1={q1:.3f}, Q2={q2:.3f}, Q3={q3:.3f}")
+    
+    elif analysis_type == "bar":
+        if "groups" in stats:
+            formatted.append(f"Number of groups: {stats['groups']}")
+        if "total_observations" in stats:
+            formatted.append(f"Total observations: {stats['total_observations']}")
+    
+    # Add any other general statistics
+    for key, value in stats.items():
+        if key not in ["correlation", "p_value", "sample_size", "x_mean", "y_mean", "x_range", "y_range", 
+                      "mean", "median", "std_dev", "skewness", "range", "quartiles", "groups", "total_observations"]:
+            if isinstance(value, (int, float)):
+                formatted.append(f"{key}: {value}")
+            else:
+                formatted.append(f"{key}: {str(value)}")
+    
+    return "\n".join(formatted) if formatted else "No statistical measures calculated"
+
 
 # --- Tool factory with session lookup ---
 def create_mapping_tool(session_id: str):
@@ -692,7 +785,7 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
     """
     Enhanced data analysis that works with both original column names and role mappings.
     Returns:
-        tuple: (processed_data, visualization_config)
+        tuple: (processed_data, visualization_config, statistical_summary, insights)
     """
     try:
         print("DataFrame columns:", df.columns.tolist())
@@ -702,9 +795,7 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
 
         # If mappings are provided, create lookup dictionaries
         if mappings:
-            # original_name -> role
             original_to_role = {orig: role for orig, role in mappings.items() if role != "Ignore"}
-            # role -> original_name (reverse lookup)
             role_to_original = {role: orig for orig, role in mappings.items() if role != "Ignore"}
         else:
             original_to_role = {}
@@ -714,21 +805,15 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         df_columns = set(df.columns)
 
         def resolve_column_name(requested_col):
-            """
-            Resolve a column name that could be either original or role name
-            Returns the actual column name that exists in the DataFrame
-            """
-            # Direct match - column exists in DataFrame
+            """Resolve a column name that could be either original or role name"""
             if requested_col in df_columns:
                 return requested_col
             
-            # If requested_col is a role, find the original column name
             if requested_col in role_to_original:
                 original_col = role_to_original[requested_col]
                 if original_col in df_columns:
                     return original_col
             
-            # If requested_col is an original name, check if it maps to a role that exists
             if requested_col in original_to_role:
                 role = original_to_role[requested_col]
                 if role in df_columns:
@@ -761,14 +846,15 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         if df_clean.empty:
             raise ValueError("No valid data remaining after cleaning")
 
-        # Create user-friendly labels for the axes
+        # Initialize containers for insights and statistical summary
+        statistical_summary = {}
+        insights = []
+
         def get_display_label(col_name):
             """Get a user-friendly label for display"""
-            # If we have mappings and this is an original column, use the role
             if mappings and col_name in original_to_role:
                 role = original_to_role[col_name]
                 return f"{col_name} ({role})"
-            # If this is already a role or no mappings, use as-is
             return col_name.replace('_', ' ').title()
 
         visualization_config = {
@@ -780,32 +866,98 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
                 "yAxis": actual_y_column,
                 "xAxisLabel": get_display_label(actual_x_column),
                 "yAxisLabel": get_display_label(actual_y_column) if actual_y_column else "",
-                "originalXColumn": x_column,  # Store the original request
-                "originalYColumn": y_column,  # Store the original request
+                "originalXColumn": x_column,
+                "originalYColumn": y_column,
             }
         }
 
-        # Process data based on analysis type using the actual column names
+        # Process data based on analysis type with enhanced insights
         if analysis_type == "scatter" or analysis_type == "line":
             if not actual_y_column:
                 raise ValueError(f"{analysis_type} plot requires both x and y columns")
             
             processed_data = df_clean[[actual_x_column, actual_y_column]].to_dict('records')
             
-            # Add correlation info for scatter plots
-            if analysis_type == "scatter" and len(df_clean) > 1:
+            # Enhanced analysis for scatter/line plots
+            if len(df_clean) > 1:
                 corr, p_value = pearsonr(df_clean[actual_x_column], df_clean[actual_y_column])
-                visualization_config["config"]["description"] += f" Correlation: {corr:.3f} (p={p_value:.3f})"
+                statistical_summary = {
+                    "correlation": corr,
+                    "p_value": p_value,
+                    "sample_size": len(df_clean),
+                    "x_mean": df_clean[actual_x_column].mean(),
+                    "y_mean": df_clean[actual_y_column].mean(),
+                    "x_std": df_clean[actual_x_column].std(),
+                    "y_std": df_clean[actual_y_column].std(),
+                    "x_range": [df_clean[actual_x_column].min(), df_clean[actual_x_column].max()],
+                    "y_range": [df_clean[actual_y_column].min(), df_clean[actual_y_column].max()]
+                }
+                
+                # Generate insights based on correlation
+                if abs(corr) > 0.7:
+                    strength = "strong"
+                elif abs(corr) > 0.5:
+                    strength = "moderate"
+                elif abs(corr) > 0.3:
+                    strength = "weak"
+                else:
+                    strength = "very weak"
+                
+                direction = "positive" if corr > 0 else "negative"
+                
+                insights.append(f"There is a {strength} {direction} correlation (r = {corr:.3f}) between {get_display_label(actual_x_column)} and {get_display_label(actual_y_column)}.")
+                
+                if p_value < 0.05:
+                    insights.append(f"The correlation is statistically significant (p = {p_value:.3f}), suggesting a meaningful relationship.")
+                else:
+                    insights.append(f"The correlation is not statistically significant (p = {p_value:.3f}), suggesting the relationship may be due to random variation.")
+                
+                # Marine science specific insights
+                if 'temperature' in actual_x_column.lower() and 'depth' in actual_y_column.lower():
+                    if corr < -0.3:
+                        insights.append("This negative relationship between temperature and depth is typical in ocean profiles, showing thermocline structure.")
+                elif 'salinity' in actual_x_column.lower() and 'temperature' in actual_y_column.lower():
+                    insights.append("This temperature-salinity relationship can reveal water mass characteristics and mixing processes.")
         
         elif analysis_type == "bar":
             if actual_y_column:
-                grouped = df_clean.groupby(actual_x_column)[actual_y_column].mean().reset_index()
-                processed_data = grouped.to_dict('records')
+                grouped = df_clean.groupby(actual_x_column)[actual_y_column].agg(['mean', 'std', 'count']).reset_index()
+                processed_data = grouped.rename(columns={'mean': actual_y_column}).to_dict('records')
+                
+                # Statistical summary for grouped data
+                statistical_summary = {
+                    "groups": len(grouped),
+                    "total_observations": grouped['count'].sum(),
+                    "mean_values": grouped['mean'].tolist(),
+                    "std_values": grouped['std'].tolist(),
+                    "group_sizes": grouped['count'].tolist()
+                }
+                
+                # Generate insights
+                max_group = grouped.loc[grouped['mean'].idxmax(), actual_x_column]
+                min_group = grouped.loc[grouped['mean'].idxmin(), actual_x_column]
+                overall_mean = grouped['mean'].mean()
+                
+                insights.append(f"The analysis shows {len(grouped)} different groups with varying {get_display_label(actual_y_column)} values.")
+                insights.append(f"'{max_group}' has the highest average value, while '{min_group}' has the lowest.")
+                insights.append(f"The overall average across all groups is {overall_mean:.2f}.")
+                
             else:
                 # Count occurrences
                 value_counts = df_clean[actual_x_column].value_counts().reset_index()
                 value_counts.columns = [actual_x_column, 'count']
                 processed_data = value_counts.to_dict('records')
+                
+                statistical_summary = {
+                    "unique_categories": len(value_counts),
+                    "total_observations": value_counts['count'].sum(),
+                    "most_common": value_counts.iloc[0][actual_x_column],
+                    "most_common_count": value_counts.iloc[0]['count']
+                }
+                
+                insights.append(f"The data contains {len(value_counts)} unique categories in {get_display_label(actual_x_column)}.")
+                insights.append(f"'{statistical_summary['most_common']}' is the most frequent category with {statistical_summary['most_common_count']} occurrences.")
+                
                 visualization_config["config"]["yAxis"] = 'count'
                 visualization_config["config"]["yAxisLabel"] = 'Count'
         
@@ -813,6 +965,18 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
             if not actual_y_column:
                 raise ValueError("Area plot requires both x and y columns")
             processed_data = df_clean[[actual_x_column, actual_y_column]].sort_values(actual_x_column).to_dict('records')
+            
+            # Time series or sequential analysis
+            statistical_summary = {
+                "data_points": len(df_clean),
+                "trend": "increasing" if df_clean[actual_y_column].iloc[-1] > df_clean[actual_y_column].iloc[0] else "decreasing",
+                "total_change": df_clean[actual_y_column].iloc[-1] - df_clean[actual_y_column].iloc[0],
+                "peak_value": df_clean[actual_y_column].max(),
+                "valley_value": df_clean[actual_y_column].min()
+            }
+            
+            insights.append(f"The area plot shows {statistical_summary['trend']} trend over the range of {get_display_label(actual_x_column)}.")
+            insights.append(f"Total change from start to end: {statistical_summary['total_change']:.2f}")
         
         elif analysis_type == "histogram":
             # Create bins for histogram
@@ -823,6 +987,33 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
                 {actual_x_column: float(center), 'frequency': int(count)} 
                 for center, count in zip(bin_centers, hist_data)
             ]
+            
+            # Enhanced statistical analysis for distribution
+            data_values = df_clean[actual_x_column].dropna()
+            statistical_summary = {
+                "mean": data_values.mean(),
+                "median": data_values.median(),
+                "std_dev": data_values.std(),
+                "skewness": data_values.skew(),
+                "kurtosis": data_values.kurtosis(),
+                "range": [data_values.min(), data_values.max()],
+                "quartiles": [data_values.quantile(0.25), data_values.quantile(0.5), data_values.quantile(0.75)]
+            }
+            
+            # Generate distribution insights
+            if abs(statistical_summary["skewness"]) < 0.5:
+                distribution_shape = "approximately normal"
+            elif statistical_summary["skewness"] > 0.5:
+                distribution_shape = "right-skewed (positively skewed)"
+            else:
+                distribution_shape = "left-skewed (negatively skewed)"
+            
+            insights.append(f"The distribution of {get_display_label(actual_x_column)} appears {distribution_shape}.")
+            insights.append(f"Mean: {statistical_summary['mean']:.2f}, Median: {statistical_summary['median']:.2f}, Standard Deviation: {statistical_summary['std_dev']:.2f}")
+            
+            if abs(statistical_summary['mean'] - statistical_summary['median']) > statistical_summary['std_dev'] * 0.1:
+                insights.append("The difference between mean and median suggests some asymmetry in the data distribution.")
+            
             visualization_config["config"]["yAxis"] = 'frequency'
             visualization_config["config"]["yAxisLabel"] = 'Frequency'
             visualization_config["type"] = "bar"  # Use bar chart for histogram display
@@ -830,13 +1021,22 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         else:
             raise ValueError(f"Unsupported analysis type: {analysis_type}")
         
-        return processed_data, visualization_config
+        # Add general data quality insights
+        if actual_y_column:
+            missing_x = df[actual_x_column].isnull().sum()
+            missing_y = df[actual_y_column].isnull().sum()
+            if missing_x > 0 or missing_y > 0:
+                insights.append(f"Note: {missing_x + missing_y} data points were excluded due to missing values.")
+        
+        return processed_data, visualization_config, statistical_summary, insights
         
     except Exception as e:
         logger.error(f"Error in data analysis: {e}")
         raise e
 
 # Update the analysis tool to work better with mixed column naming
+# Replace the existing create_analysis_tool function with this enhanced version:
+
 def create_analysis_tool(session_id: str):
     @tool
     def generate_analysis_and_plot(analysis_type: str, x_column: str, y_column: str = None, 
@@ -915,30 +1115,54 @@ def create_analysis_tool(session_id: str):
                 if response.status_code == 200:
                     result = response.json()
                     if result.get("status") == "success":
-                        # Send the processed data and config to frontend
+                        # Send the processed data and config to frontend WITH insights
                         analysis_result = {
                             "type": "analysis_result",
                             "payload": {
                                 "analysis_type": analysis_type,
                                 "data": result["data"],
-                                "config": result["config"]
+                                "config": result["config"],
+                                "statistical_summary": result.get("statistical_summary", {}),
+                                "insights": result.get("insights", [])
                             }
                         }
                         mgr.broadcast_sync(analysis_result)
                         
-                        # Provide informative feedback about column resolution
+                        # Return enhanced context for deep marine science interpretation
                         config = result["config"]
+                        insights = result.get("insights", [])
+                        stats = result.get("statistical_summary", {})
+                        data_count = len(result.get("data", []))
+                        raw_data = result.get("data", [])
+                        
                         x_actual = config.get("xAxis", x_column)
                         y_actual = config.get("yAxis", y_column)
                         
-                        feedback = f"Successfully generated {analysis_type} visualization"
-                        if x_actual != x_column or (y_column and y_actual != y_column):
-                            feedback += f" (columns resolved: {x_column}→{x_actual}"
-                            if y_column:
-                                feedback += f", {y_column}→{y_actual}"
-                            feedback += ")"
+                        # Generate enhanced context for LLM interpretation
+                        interpretation_context = generate_marine_science_context(
+                            analysis_type, x_actual, y_actual, stats, raw_data, mappings
+                        )
                         
-                        return feedback
+                        # Return structured information for deep LLM interpretation
+                        return f"""VISUALIZATION_CREATED: {analysis_type} plot with {data_count} data points showing {x_actual} vs {y_actual}.
+
+MARINE SCIENCE ANALYSIS CONTEXT:
+{interpretation_context}
+
+STATISTICAL RESULTS:
+{format_enhanced_stats(stats, analysis_type)}
+
+AUTOMATED INSIGHTS:
+{chr(10).join([f"- {insight}" for insight in insights]) if insights else "- No automated insights generated"}
+
+Now provide expert marine science interpretation focusing on:
+1. OCEANOGRAPHIC SIGNIFICANCE - What do these patterns reveal about marine processes?
+2. DATA QUALITY ASSESSMENT - Are there suspicious patterns, outliers, or measurement issues?
+3. ECOLOGICAL IMPLICATIONS - What does this mean for marine life and ecosystem health?
+4. ENVIRONMENTAL CONTEXT - How do these values compare to expected marine conditions?
+5. RESEARCH IMPLICATIONS - What further investigation or monitoring is recommended?
+
+Be specific about what makes patterns normal, unusual, or concerning in marine science context."""
                     else:
                         return f"Error processing analysis: {result.get('error', 'Unknown error')}"
                 else:
@@ -955,6 +1179,199 @@ def create_analysis_tool(session_id: str):
             return f"Error: {e}"
     
     return generate_analysis_and_plot
+
+def generate_marine_science_context(analysis_type, x_variable, y_variable, stats, raw_data, mappings):
+    """Generate rich context for marine science interpretation"""
+    context_lines = []
+    
+    # Variable identification and expected ranges
+    variable_context = identify_marine_variables(x_variable, y_variable)
+    context_lines.extend(variable_context)
+    
+    # Data quality flags based on marine science knowledge
+    quality_flags = assess_marine_data_quality(x_variable, y_variable, stats, raw_data)
+    if quality_flags:
+        context_lines.append("\nDATA QUALITY INDICATORS:")
+        context_lines.extend(quality_flags)
+    
+    # Pattern significance based on analysis type
+    pattern_significance = get_pattern_significance(analysis_type, x_variable, y_variable, stats)
+    if pattern_significance:
+        context_lines.append("\nPATTERN SIGNIFICANCE:")
+        context_lines.extend(pattern_significance)
+    
+    return "\n".join(context_lines)
+
+def identify_marine_variables(x_var, y_var):
+    """Identify marine variables and provide expected ranges/context"""
+    context = []
+    
+    variables = [x_var, y_var] if y_var else [x_var]
+    
+    for var in variables:
+        var_lower = var.lower()
+        
+        if 'oxygen' in var_lower:
+            context.append(f"- {var}: Marine dissolved oxygen")
+            context.append(f"  • Normal range: 0-15 mg/L (0-10 mL/L)")
+            context.append(f"  • Hypoxic: < 2 mg/L, Anoxic: < 0.5 mg/L")
+            context.append(f"  • Supersaturation: > 10-12 mg/L (may indicate measurement error or algal bloom)")
+            
+        elif 'temperature' in var_lower:
+            context.append(f"- {var}: Water temperature")
+            context.append(f"  • Ocean surface: typically -2°C to 35°C")
+            context.append(f"  • Deep water: typically 0-4°C")
+            context.append(f"  • Suspicious: values outside -2°C to 40°C range")
+            
+        elif 'salinity' in var_lower:
+            context.append(f"- {var}: Water salinity")
+            context.append(f"  • Open ocean: typically 34-37 PSU")
+            context.append(f"  • Coastal/estuarine: 0-35 PSU")
+            context.append(f"  • Suspicious: values > 42 PSU or negative values")
+            
+        elif 'depth' in var_lower:
+            context.append(f"- {var}: Water depth")
+            context.append(f"  • Should be positive values")
+            context.append(f"  • Suspicious: negative depths or extremely deep values")
+            
+        elif any(nutrient in var_lower for nutrient in ['phosphate', 'nitrate', 'silicate']):
+            context.append(f"- {var}: Marine nutrient")
+            context.append(f"  • Typical range: 0-50 μM (varies by nutrient and location)")
+            context.append(f"  • Suspicious: negative values or extremely high concentrations")
+            
+        elif 'ph' in var_lower:
+            context.append(f"- {var}: Seawater pH")
+            context.append(f"  • Normal range: 7.5-8.5")
+            context.append(f"  • Ocean acidification: declining pH trends")
+            context.append(f"  • Suspicious: values outside 6.0-9.0 range")
+    
+    return context
+
+def assess_marine_data_quality(x_var, y_var, stats, raw_data):
+    """Assess data quality based on marine science knowledge"""
+    flags = []
+    
+    # Check for impossible values based on variable type
+    if 'oxygen' in x_var.lower():
+        if stats.get('range') and len(stats['range']) == 2:
+            min_val, max_val = stats['range']
+            if min_val < -1:
+                flags.append(f"⚠️ Negative oxygen values detected (min: {min_val:.2f}) - likely measurement error")
+            if max_val > 20:
+                flags.append(f"⚠️ Extremely high oxygen values (max: {max_val:.2f}) - check calibration")
+        
+        # Check for hypoxic/anoxic conditions
+        if stats.get('mean') and stats['mean'] < 2:
+            flags.append(f"🔴 Mean oxygen < 2 mg/L indicates hypoxic conditions")
+        
+        # Check distribution for bimodality (might indicate mixed water masses)
+        if 'skewness' in stats and abs(stats['skewness']) > 1.5:
+            flags.append(f"📊 Highly skewed distribution (skewness: {stats['skewness']:.2f}) - investigate data sources")
+    
+    elif 'temperature' in x_var.lower():
+        if stats.get('range') and len(stats['range']) == 2:
+            min_val, max_val = stats['range']
+            if min_val < -3 or max_val > 40:
+                flags.append(f"⚠️ Temperature outside typical marine range ({min_val:.1f}°C to {max_val:.1f}°C)")
+    
+    elif 'salinity' in x_var.lower():
+        if stats.get('range') and len(stats['range']) == 2:
+            min_val, max_val = stats['range']
+            if min_val < 0 or max_val > 42:
+                flags.append(f"⚠️ Salinity outside realistic range ({min_val:.1f} to {max_val:.1f} PSU)")
+    
+    # General quality checks
+    if 'sample_size' in stats and stats['sample_size'] < 10:
+        flags.append(f"📉 Small sample size (n={stats['sample_size']}) - limited statistical reliability")
+    
+    if 'std_dev' in stats and 'mean' in stats and stats['mean'] != 0:
+        cv = abs(stats['std_dev'] / stats['mean'])
+        if cv > 2:
+            flags.append(f"📊 High coefficient of variation ({cv:.2f}) - very variable data")
+    
+    return flags
+
+def get_pattern_significance(analysis_type, x_var, y_var, stats):
+    """Determine what patterns might signify in marine science context"""
+    significance = []
+    
+    if analysis_type == "histogram":
+        # Distribution shape significance
+        if 'skewness' in stats:
+            skew = stats['skewness']
+            if abs(skew) < 0.5:
+                significance.append("- Normal distribution may indicate well-mixed water masses")
+            elif skew > 1:
+                significance.append("- Right-skewed: few high values, possibly indicating contamination or instrument drift")
+            elif skew < -1:
+                significance.append("- Left-skewed: few low values, might indicate detection limit issues")
+        
+        # Bimodal patterns
+        if 'oxygen' in x_var.lower():
+            significance.append("- Bimodal oxygen distribution could indicate:")
+            significance.append("  • Mixing of different water masses")
+            significance.append("  • Seasonal stratification effects")
+            significance.append("  • Day/night respiration cycles")
+    
+    elif analysis_type == "scatter":
+        # Correlation significance in marine context
+        if 'correlation' in stats:
+            corr = stats['correlation']
+            x_lower, y_lower = x_var.lower(), y_var.lower() if y_var else ""
+            
+            if 'temperature' in x_lower and 'depth' in y_lower:
+                if corr < -0.5:
+                    significance.append("- Strong negative T-D correlation indicates thermocline presence")
+                elif abs(corr) < 0.3:
+                    significance.append("- Weak T-D correlation might indicate mixed water column")
+            
+            elif 'oxygen' in x_lower and 'depth' in y_lower:
+                if corr < -0.5:
+                    significance.append("- Oxygen depletion with depth suggests consumption processes")
+                elif corr > 0.3:
+                    significance.append("- Oxygen increase with depth is unusual - check data quality")
+            
+            elif 'temperature' in x_lower and 'salinity' in y_lower:
+                significance.append("- T-S relationship reveals water mass characteristics")
+                if abs(corr) > 0.7:
+                    significance.append("- Strong T-S correlation indicates conservative mixing")
+    
+    return significance
+
+def format_enhanced_stats(stats, analysis_type):
+    """Format statistical results with marine science context"""
+    if not stats:
+        return "No statistical summary available"
+    
+    formatted = []
+    
+    # Core statistics with interpretation hints
+    for key, value in stats.items():
+        if key == "correlation" and value is not None:
+            strength = "very strong" if abs(value) > 0.8 else "strong" if abs(value) > 0.6 else "moderate" if abs(value) > 0.4 else "weak"
+            formatted.append(f"Correlation: {value:.4f} ({strength} {'positive' if value > 0 else 'negative'} relationship)")
+        elif key == "p_value" and value is not None:
+            sig = "highly significant" if value < 0.001 else "significant" if value < 0.05 else "not significant"
+            formatted.append(f"P-value: {value:.4f} ({sig})")
+        elif key == "mean" and value is not None:
+            formatted.append(f"Mean: {value:.3f}")
+        elif key == "median" and value is not None:
+            formatted.append(f"Median: {value:.3f}")
+        elif key == "std_dev" and value is not None:
+            formatted.append(f"Standard deviation: {value:.3f}")
+        elif key == "skewness" and value is not None:
+            shape = "normal" if abs(value) < 0.5 else "right-skewed" if value > 0.5 else "left-skewed"
+            formatted.append(f"Skewness: {value:.3f} ({shape} distribution)")
+        elif key == "range" and isinstance(value, list) and len(value) == 2:
+            formatted.append(f"Range: {value[0]:.3f} to {value[1]:.3f} (span: {value[1]-value[0]:.3f})")
+        elif key == "sample_size":
+            reliability = "high" if value > 100 else "moderate" if value > 30 else "low"
+            formatted.append(f"Sample size: {value} ({reliability} statistical reliability)")
+        elif key in ["groups", "total_observations"]:
+            formatted.append(f"{key.replace('_', ' ').title()}: {value}")
+    
+    return "\n".join(formatted) if formatted else "No statistical measures calculated"
+
 
 
 @app.get("/analysis/suggestions/{session_id}/{source_phase_id}")
@@ -2862,12 +3279,21 @@ User request: "{user_message}"
 
             User request: "{user_message}"
 
-            Based on the request, determine the appropriate visualization and use the generate_analysis_and_plot tool with:
-            - analysis_type: choose from line, scatter, bar, area, histogram
-            - x_column: the original column name for x-axis  
-            - y_column: the original column name for y-axis (if needed)
-            - title: descriptive title
-            - description: brief analysis description
+            Steps to follow:
+                1. Use the generate_analysis_and_plot tool with appropriate parameters:
+                - analysis_type: choose from line, scatter, bar, area, histogram
+                - x_column: use original column name for x-axis  
+                - y_column: use original column name for y-axis (if needed)
+                - title: descriptive title
+                - description: brief analysis description
+
+                2. When the tool returns statistical results, provide comprehensive interpretation covering:
+                - What the statistical measures mean in practical terms
+                - Marine science context and oceanographic implications  
+                - Data quality observations and reliability
+                - Ecological or environmental significance
+                - Practical applications for research or monitoring
+
 
             Always use the tool when users ask for plots, charts, visualizations, or data analysis."""
         else:
