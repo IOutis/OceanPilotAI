@@ -21,6 +21,7 @@ from scipy import stats
 from scipy.stats import pearsonr
 import pandas as pd
 import numpy as np
+import requests
 
 
 SESSIONS: Dict[str, Dict] = {}
@@ -163,12 +164,7 @@ async def process_analysis_data(payload: dict):
         
         df = pd.DataFrame(data)
         print("In process_analysis_data, DataFrame columns:", df.columns.tolist())
-        # Apply mappings
-        # rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-        # df.rename(columns=rename_map, inplace=True)
-        
-        # columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
-        # df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+       
         
         # Process the analysis
         processed_data, visualization_config = perform_data_analysis(df, analysis_config)
@@ -565,10 +561,136 @@ Always use tools when users ask for plots, charts, or data analysis."""),
             early_stopping_method="generate",
         )
 
+# def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dict = None) -> tuple:
+#     """
+#     Perform the actual data analysis and return processed data and visualization config.
+#     Accepts both mapped roles and original column names for x_column/y_column.
+#     Returns:
+#         tuple: (processed_data, visualization_config)
+#     """
+#     try:
+#         print("DataFrame columns:", df.columns.tolist())
+#         analysis_type = analysis_config["analysis_type"]
+#         x_column = analysis_config["x_column"]
+#         y_column = analysis_config.get("y_column")
+
+#         # If mappings are not provided, use empty dict
+#         mappings = mappings or {}
+
+#         # Build mapping: original -> role and role -> original
+#         original_to_role = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+#         role_to_original = {role: orig for orig, role in mappings.items() if role != "Ignore"}
+
+#         # Columns in DataFrame after renaming
+#         df_columns = set(df.columns)
+
+#         # Map x_column and y_column to actual DataFrame columns
+#         def resolve_column(col):
+#             # If col is in DataFrame, use it
+#             if col in df_columns:
+#                 return col
+#             # If col is a mapped role, use it
+#             if col in original_to_role.values() and col in df_columns:
+#                 return col
+#             # If col is an original column name, map to role
+#             if col in original_to_role and original_to_role[col] in df_columns:
+#                 return original_to_role[col]
+#             # If col is a role, map to original and check
+#             if col in role_to_original and role_to_original[col] in df_columns:
+#                 return role_to_original[col]
+#             return None
+
+#         x_col_in_df = resolve_column(x_column)
+#         y_col_in_df = resolve_column(y_column) if y_column else None
+
+#         missing = []
+#         if not x_col_in_df:
+#             missing.append(x_column)
+#         if y_column and not y_col_in_df:
+#             missing.append(y_column)
+#         if missing:
+#             raise KeyError(missing)
+
+#         # Remove any infinite values and convert to numeric where possible
+#         df_clean = df.copy()
+
+#         # Convert columns to numeric if possible
+#         for col in [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]:
+#             if col in df_clean.columns:
+#                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+
+#         # Remove rows with NaN values in key columns
+#         # columns_to_check = [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]
+#         # df_clean = df_clean.dropna(subset=columns_to_check)
+
+#         if df_clean.empty:
+#             raise ValueError("No valid data remaining after cleaning")
+
+#         visualization_config = {
+#             "type": analysis_type,
+#             "config": {
+#                 "title": analysis_config.get("title", f"{analysis_type.title()} Analysis"),
+#                 "description": analysis_config.get("description", ""),
+#                 "xAxis": x_col_in_df,
+#                 "yAxis": y_col_in_df,
+#                 "xAxisLabel": x_col_in_df.replace('_', ' ').title(),
+#                 "yAxisLabel": y_col_in_df.replace('_', ' ').title() if y_col_in_df else ""
+#             }
+#         }
+#         # Process data based on analysis type
+#         if analysis_type == "scatter" or analysis_type == "line":
+#             if not y_column:
+#                 raise ValueError(f"{analysis_type} plot requires both x and y columns")
+            
+#             processed_data = df_clean[[x_column, y_column]].to_dict('records')
+            
+#             # Add correlation info for scatter plots
+#             if analysis_type == "scatter" and len(df_clean) > 1:
+#                 corr, p_value = pearsonr(df_clean[x_column], df_clean[y_column])
+#                 visualization_config["config"]["description"] += f" Correlation: {corr:.3f} (p={p_value:.3f})"
+        
+#         elif analysis_type == "bar":
+#             # For bar charts, group by x_column and aggregate y_column
+#             if y_column:
+#                 grouped = df_clean.groupby(x_column)[y_column].mean().reset_index()
+#                 processed_data = grouped.to_dict('records')
+#             else:
+#                 # Count occurrences
+#                 value_counts = df_clean[x_column].value_counts().reset_index()
+#                 value_counts.columns = [x_column, 'count']
+#                 processed_data = value_counts.to_dict('records')
+#                 visualization_config["config"]["yAxis"] = 'count'
+#                 visualization_config["config"]["yAxisLabel"] = 'Count'
+        
+#         elif analysis_type == "area":
+#             if not y_column:
+#                 raise ValueError("Area plot requires both x and y columns")
+#             processed_data = df_clean[[x_column, y_column]].sort_values(x_column).to_dict('records')
+        
+#         elif analysis_type == "histogram":
+#             # Create bins for histogram
+#             hist_data, bin_edges = np.histogram(df_clean[x_column], bins=20)
+#             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            
+#             processed_data = [
+#                 {x_column: float(center), 'frequency': int(count)} 
+#                 for center, count in zip(bin_centers, hist_data)
+#             ]
+#             visualization_config["config"]["yAxis"] = 'frequency'
+#             visualization_config["config"]["yAxisLabel"] = 'Frequency'
+#             visualization_config["type"] = "bar"  # Use bar chart for histogram display
+        
+#         else:
+#             raise ValueError(f"Unsupported analysis type: {analysis_type}")
+        
+#         return processed_data, visualization_config
+        
+#     except Exception as e:
+#         logger.error(f"Error in data analysis: {e}")
+#         raise e
 def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dict = None) -> tuple:
     """
-    Perform the actual data analysis and return processed data and visualization config.
-    Accepts both mapped roles and original column names for x_column/y_column.
+    Enhanced data analysis that works with both original column names and role mappings.
     Returns:
         tuple: (processed_data, visualization_config)
     """
@@ -578,106 +700,127 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         x_column = analysis_config["x_column"]
         y_column = analysis_config.get("y_column")
 
-        # If mappings are not provided, use empty dict
-        mappings = mappings or {}
+        # If mappings are provided, create lookup dictionaries
+        if mappings:
+            # original_name -> role
+            original_to_role = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+            # role -> original_name (reverse lookup)
+            role_to_original = {role: orig for orig, role in mappings.items() if role != "Ignore"}
+        else:
+            original_to_role = {}
+            role_to_original = {}
 
-        # Build mapping: original -> role and role -> original
-        original_to_role = {orig: role for orig, role in mappings.items() if role != "Ignore"}
-        role_to_original = {role: orig for orig, role in mappings.items() if role != "Ignore"}
-
-        # Columns in DataFrame after renaming
+        # Get columns actually available in DataFrame
         df_columns = set(df.columns)
 
-        # Map x_column and y_column to actual DataFrame columns
-        def resolve_column(col):
-            # If col is in DataFrame, use it
-            if col in df_columns:
-                return col
-            # If col is a mapped role, use it
-            if col in original_to_role.values() and col in df_columns:
-                return col
-            # If col is an original column name, map to role
-            if col in original_to_role and original_to_role[col] in df_columns:
-                return original_to_role[col]
-            # If col is a role, map to original and check
-            if col in role_to_original and role_to_original[col] in df_columns:
-                return role_to_original[col]
+        def resolve_column_name(requested_col):
+            """
+            Resolve a column name that could be either original or role name
+            Returns the actual column name that exists in the DataFrame
+            """
+            # Direct match - column exists in DataFrame
+            if requested_col in df_columns:
+                return requested_col
+            
+            # If requested_col is a role, find the original column name
+            if requested_col in role_to_original:
+                original_col = role_to_original[requested_col]
+                if original_col in df_columns:
+                    return original_col
+            
+            # If requested_col is an original name, check if it maps to a role that exists
+            if requested_col in original_to_role:
+                role = original_to_role[requested_col]
+                if role in df_columns:
+                    return role
+            
             return None
 
-        x_col_in_df = resolve_column(x_column)
-        y_col_in_df = resolve_column(y_column) if y_column else None
+        # Resolve the actual column names to use
+        actual_x_column = resolve_column_name(x_column)
+        actual_y_column = resolve_column_name(y_column) if y_column else None
 
-        missing = []
-        if not x_col_in_df:
-            missing.append(x_column)
-        if y_column and not y_col_in_df:
-            missing.append(y_column)
-        if missing:
-            raise KeyError(missing)
+        # Check if columns were found
+        missing_columns = []
+        if not actual_x_column:
+            missing_columns.append(x_column)
+        if y_column and not actual_y_column:
+            missing_columns.append(y_column)
+        
+        if missing_columns:
+            raise KeyError(f"Columns not found: {missing_columns}")
 
-        # Remove any infinite values and convert to numeric where possible
+        # Clean the data
         df_clean = df.copy()
 
-        # Convert columns to numeric if possible
-        for col in [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]:
+        # Convert to numeric if possible
+        for col in [actual_x_column, actual_y_column] if actual_y_column else [actual_x_column]:
             if col in df_clean.columns:
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
 
-        # Remove rows with NaN values in key columns
-        # columns_to_check = [x_col_in_df, y_col_in_df] if y_col_in_df else [x_col_in_df]
-        # df_clean = df_clean.dropna(subset=columns_to_check)
-
         if df_clean.empty:
             raise ValueError("No valid data remaining after cleaning")
+
+        # Create user-friendly labels for the axes
+        def get_display_label(col_name):
+            """Get a user-friendly label for display"""
+            # If we have mappings and this is an original column, use the role
+            if mappings and col_name in original_to_role:
+                role = original_to_role[col_name]
+                return f"{col_name} ({role})"
+            # If this is already a role or no mappings, use as-is
+            return col_name.replace('_', ' ').title()
 
         visualization_config = {
             "type": analysis_type,
             "config": {
                 "title": analysis_config.get("title", f"{analysis_type.title()} Analysis"),
                 "description": analysis_config.get("description", ""),
-                "xAxis": x_col_in_df,
-                "yAxis": y_col_in_df,
-                "xAxisLabel": x_col_in_df.replace('_', ' ').title(),
-                "yAxisLabel": y_col_in_df.replace('_', ' ').title() if y_col_in_df else ""
+                "xAxis": actual_x_column,
+                "yAxis": actual_y_column,
+                "xAxisLabel": get_display_label(actual_x_column),
+                "yAxisLabel": get_display_label(actual_y_column) if actual_y_column else "",
+                "originalXColumn": x_column,  # Store the original request
+                "originalYColumn": y_column,  # Store the original request
             }
         }
-        # Process data based on analysis type
+
+        # Process data based on analysis type using the actual column names
         if analysis_type == "scatter" or analysis_type == "line":
-            if not y_column:
+            if not actual_y_column:
                 raise ValueError(f"{analysis_type} plot requires both x and y columns")
             
-            processed_data = df_clean[[x_column, y_column]].to_dict('records')
+            processed_data = df_clean[[actual_x_column, actual_y_column]].to_dict('records')
             
             # Add correlation info for scatter plots
             if analysis_type == "scatter" and len(df_clean) > 1:
-                corr, p_value = pearsonr(df_clean[x_column], df_clean[y_column])
+                corr, p_value = pearsonr(df_clean[actual_x_column], df_clean[actual_y_column])
                 visualization_config["config"]["description"] += f" Correlation: {corr:.3f} (p={p_value:.3f})"
         
         elif analysis_type == "bar":
-            # For bar charts, group by x_column and aggregate y_column
-            if y_column:
-                grouped = df_clean.groupby(x_column)[y_column].mean().reset_index()
+            if actual_y_column:
+                grouped = df_clean.groupby(actual_x_column)[actual_y_column].mean().reset_index()
                 processed_data = grouped.to_dict('records')
             else:
                 # Count occurrences
-                value_counts = df_clean[x_column].value_counts().reset_index()
-                value_counts.columns = [x_column, 'count']
+                value_counts = df_clean[actual_x_column].value_counts().reset_index()
+                value_counts.columns = [actual_x_column, 'count']
                 processed_data = value_counts.to_dict('records')
                 visualization_config["config"]["yAxis"] = 'count'
                 visualization_config["config"]["yAxisLabel"] = 'Count'
         
         elif analysis_type == "area":
-            if not y_column:
+            if not actual_y_column:
                 raise ValueError("Area plot requires both x and y columns")
-            processed_data = df_clean[[x_column, y_column]].sort_values(x_column).to_dict('records')
+            processed_data = df_clean[[actual_x_column, actual_y_column]].sort_values(actual_x_column).to_dict('records')
         
         elif analysis_type == "histogram":
             # Create bins for histogram
-            hist_data, bin_edges = np.histogram(df_clean[x_column], bins=20)
+            hist_data, bin_edges = np.histogram(df_clean[actual_x_column], bins=20)
             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
             
             processed_data = [
-                {x_column: float(center), 'frequency': int(count)} 
+                {actual_x_column: float(center), 'frequency': int(count)} 
                 for center, count in zip(bin_centers, hist_data)
             ]
             visualization_config["config"]["yAxis"] = 'frequency'
@@ -692,6 +835,126 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
     except Exception as e:
         logger.error(f"Error in data analysis: {e}")
         raise e
+
+# Update the analysis tool to work better with mixed column naming
+def create_analysis_tool(session_id: str):
+    @tool
+    def generate_analysis_and_plot(analysis_type: str, x_column: str, y_column: str = None, 
+                                 title: str = None, description: str = None) -> str:
+        """
+        Generate analysis results and visualization configuration based on user query.
+        
+        Args:
+            analysis_type: str (one of: line, scatter, bar, area, histogram, correlation_matrix)
+            x_column: str (name of the x-axis column - can be original name or role)
+            y_column: str (name of the y-axis column - can be original name or role, optional for some plot types)
+            title: str (title for the visualization)
+            description: str (description of the analysis findings)
+        """
+        try:
+            logger.info(f"🔥 ANALYSIS TOOL CALLED: {analysis_type} for session {session_id}")
+            logger.info(f"🔥 ANALYSIS COLUMNS: x={x_column}, y={y_column}")
+            
+            sess = SESSIONS.get(session_id)
+            if not sess:
+                logger.error(f"❌ Session {session_id} not found")
+                return f"Error: session {session_id} not found"
+
+            mgr = sess.get("manager")
+            if not isinstance(mgr, ConnectionManager):
+                logger.error("❌ No manager found for session")
+                return "Error: no manager found for session"
+
+            # Get the analysis request stored in session
+            pending_analysis = sess.get("pending_analysis")
+            source_phase_id = None
+            
+            if pending_analysis:
+                source_phase_id = pending_analysis.get("source_phase_id")
+            else:
+                # Default to the most recent upload
+                uploads = sess.get('uploads', [])
+                if uploads:
+                    source_phase_id = uploads[-1].get('id')
+            
+            if not source_phase_id:
+                return "Error: No data source found for analysis"
+            
+            # Find the source upload to get mappings
+            uploads = sess.get('uploads', [])
+            source_upload = None
+            for upload in uploads:
+                if upload.get('id') == source_phase_id:
+                    source_upload = upload
+                    break
+            
+            if not source_upload:
+                return "Error: Source upload not found"
+            
+            # Get mappings for better column resolution
+            mappings = source_upload.get('mappings', {})
+            
+            # Process the analysis data with mappings
+            analysis_config = {
+                "analysis_type": analysis_type,
+                "x_column": x_column,
+                "y_column": y_column,
+                "title": title or f"{analysis_type.title()} Analysis",
+                "description": description or f"Analysis of {x_column}" + (f" vs {y_column}" if y_column else "")
+            }
+            
+            # Call the analysis processing function
+            try:
+                response = requests.post('http://localhost:8000/analysis/process', 
+                    json={
+                        "session_id": session_id,
+                        "source_phase_id": source_phase_id,
+                        "analysis_config": analysis_config
+                    })
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("status") == "success":
+                        # Send the processed data and config to frontend
+                        analysis_result = {
+                            "type": "analysis_result",
+                            "payload": {
+                                "analysis_type": analysis_type,
+                                "data": result["data"],
+                                "config": result["config"]
+                            }
+                        }
+                        mgr.broadcast_sync(analysis_result)
+                        
+                        # Provide informative feedback about column resolution
+                        config = result["config"]
+                        x_actual = config.get("xAxis", x_column)
+                        y_actual = config.get("yAxis", y_column)
+                        
+                        feedback = f"Successfully generated {analysis_type} visualization"
+                        if x_actual != x_column or (y_column and y_actual != y_column):
+                            feedback += f" (columns resolved: {x_column}→{x_actual}"
+                            if y_column:
+                                feedback += f", {y_column}→{y_actual}"
+                            feedback += ")"
+                        
+                        return feedback
+                    else:
+                        return f"Error processing analysis: {result.get('error', 'Unknown error')}"
+                else:
+                    return f"Error: Analysis service returned status {response.status_code}"
+            
+            except Exception as e:
+                logger.error(f"Error calling analysis service: {e}")
+                return f"Error processing analysis: {str(e)}"
+            
+        except Exception as e:
+            logger.error(f"❌ Analysis tool failed with error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return f"Error: {e}"
+    
+    return generate_analysis_and_plot
 
 
 @app.get("/analysis/suggestions/{session_id}/{source_phase_id}")
@@ -767,120 +1030,6 @@ async def get_analysis_suggestions(session_id: str, source_phase_id: str):
 
 
 from fastapi.responses import JSONResponse
-
-# Additional endpoint for statistical summaries
-# @app.post("/analysis/statistics")
-# async def get_statistical_summary(payload: dict):
-#     """
-#     Get statistical summary of the processed data
-#     """
-#     try:
-#         session_id = payload.get("session_id")
-#         source_phase_id = payload.get("source_phase_id")
-        
-#         if not all([session_id, source_phase_id]):
-#             return {"error": "Missing required parameters"}
-        
-#         if session_id not in SESSIONS:
-#             return {"error": f"Session {session_id} not found"}
-        
-#         uploads = SESSIONS[session_id].get('uploads', [])
-#         source_upload = None
-        
-#         for upload in uploads:
-#             if upload.get('id') == source_phase_id:
-#                 source_upload = upload
-#                 break
-        
-#         if not source_upload:
-#             return {"error": f"Source phase {source_phase_id} not found"}
-        
-#         # Use processed data if available
-#         data = source_upload.get('processed_data') or source_upload.get('data')
-#         mappings = source_upload.get('mappings', {})
-        
-#         if not data:
-#             return {"error": "No data found"}
-        
-#         df = pd.DataFrame(data)
-        
-#         # Apply mappings
-#         rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-#         df.rename(columns=rename_map, inplace=True)
-        
-#         columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
-#         df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
-        
-#         # Calculate comprehensive statistics
-#         stats_summary = {}
-
-#         # Numeric columns
-#         numeric_cols = df.select_dtypes(include=[np.number]).columns
-#         for col in numeric_cols:
-#             col_data = df[col].dropna()
-#             count_val = col_data.count()
-#             if not isinstance(count_val, (np.integer, int, float)):
-#                 count_val = len(col_data)
-#             if len(col_data) > 0:
-#                 stats_summary[col] = {
-#                     "type": "numeric",
-#                     "count": int(count_val),
-#                     "mean": make_serializable(col_data.mean()),
-#                     "std": make_serializable(col_data.std()),
-#                     "min": make_serializable(col_data.min()),
-#                     "max": make_serializable(col_data.max()),
-#                     "median": make_serializable(col_data.median()),
-#                     "q25": make_serializable(col_data.quantile(0.25)),
-#                     "q75": make_serializable(col_data.quantile(0.75)),
-#                     "missing_count": int(df[col].isna().sum()),
-#                     "missing_percent": make_serializable(df[col].isna().mean() * 100)
-#                 }
-
-#         # Categorical columns
-#         categorical_cols = df.select_dtypes(include=['object', 'category']).columns
-#         for col in categorical_cols:
-#             col_data = df[col].dropna()
-#             if len(col_data) > 0:
-#                 value_counts = col_data.value_counts()
-#                 stats_summary[col] = {
-#                     "type": "categorical",
-#                     "count": int(col_data.count()),
-#                     "unique_count": int(value_counts.nunique()),
-#                     "top_value": make_serializable(value_counts.index[0]) if len(value_counts) > 0 else None,
-#                     "top_count": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
-#                     "missing_count": int(df[col].isna().sum()),
-#                     "missing_percent": make_serializable(df[col].isna().mean() * 100)
-#                 }
-
-#         # Correlation matrix for numeric columns
-#         correlation_matrix = None
-#         if len(numeric_cols) > 1:
-#             corr_df = df[numeric_cols].corr()
-#             correlation_matrix = {
-#                 "columns": list(corr_df.columns),
-#                 "matrix": [[make_serializable(v) for v in row] for row in corr_df.values.tolist()]
-#             }
-
-#         # --- FIX: Wrap all returned data with make_serializable ---
-#         result = {
-#             "status": "success",
-#             "statistics": {k: {kk: make_serializable(vv) for kk, vv in v.items()} for k, v in stats_summary.items()},
-#             "correlation_matrix": correlation_matrix,
-#             "data_shape": {"rows": int(len(df)), "columns": int(len(df.columns))},
-#             "column_types": {
-#                 "numeric": list(numeric_cols),
-#                 "categorical": list(categorical_cols)
-#             }
-#         }
-#         return JSONResponse(content=result)
-
-        
-#     except Exception as e:
-#         logger.error(f"Error generating statistical summary: {e}")
-#         import traceback
-#         logger.error(f"Traceback: {traceback.format_exc()}")
-#         return {"error": f"Failed to generate statistics: {str(e)}"}
-# Update the to_scalar helper function
 def to_scalar(val):
     """Safely convert pandas/numpy objects to Python scalars for stats."""
     if val is None:
@@ -1167,114 +1316,6 @@ async def quota_status():
 
 import pandas as pd
 import numpy as np
-# @app.post("/preprocess/stats")
-# async def get_preprocessing_stats(payload: dict):
-#     # It no longer looks up data in the session. It uses the data sent directly from the frontend.
-#     file_path = payload.get("file_path")
-#     mappings = payload.get("mappings")
-#     session_id = payload.get("session_id")
-    
-#     if not file_path or not mappings:
-#         return {"error": "A file path and mappings are required to generate stats."}
-    
-#     try:
-#         # Load the full dataset from the saved file path
-#         metadata = SESSIONS.get(session_id, {}).get("uploads", [])
-#         data_metadata = None
-#         for item in metadata:
-#             if item.get("filename") == file_path:
-#                 data_metadata = item
-#                 break
-                
-#         if not data_metadata or "data" not in data_metadata:
-#             return {"error": "No data found in session metadata."}
-            
-#         data = data_metadata["data"]
-#         df = pd.DataFrame(data)
-        
-#         # Apply the confirmed mappings to rename columns
-#         # We create a "rename map" from the mappings object
-#         rename_map = {original_name: role for original_name, role in mappings.items() if role != "Ignore"}
-#         df.rename(columns=rename_map, inplace=True)
-        
-#         # Drop the columns that the user marked as "Ignore"
-#         columns_to_drop = [original_name for original_name, role in mappings.items() if role == "Ignore"]
-#         df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
-
-#         # Convert pandas objects to JSON-safe types
-#         def make_serializable(obj):
-#             """Convert pandas/numpy objects to JSON-serializable types"""
-#             if pd.isna(obj):
-#                 return None
-#             elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
-#                 return str(obj)
-#             elif isinstance(obj, (np.integer, np.int64, np.int32)):
-#                 return int(obj)
-#             elif isinstance(obj, (np.floating, np.float64, np.float32)):
-#                 return float(obj) if not np.isnan(obj) else None
-#             elif isinstance(obj, np.ndarray):
-#                 return obj.tolist()
-#             elif hasattr(obj, 'item'):  # numpy scalars
-#                 return obj.item()
-#             else:
-#                 return obj
-
-#         # Calculate statistics with proper JSON serialization
-#         null_counts = df.isnull().sum()
-#         null_percentages = (df.isnull().sum() / len(df) * 100).round(2)
-        
-#         # Get descriptive stats only for numeric columns
-#         numeric_df = df.select_dtypes(include=[np.number])
-#         desc_stats = numeric_df.describe() if not numeric_df.empty else pd.DataFrame()
-        
-#         # Get categorical stats
-#         categorical_cols = df.select_dtypes(include=['object', 'category']).columns
-        
-#         # Build categorical stats safely
-#         categorical_stats = {}
-#         for col in categorical_cols:
-#             try:
-#                 value_counts = df[col].value_counts()
-#                 mode_values = df[col].mode()
-                
-#                 categorical_stats[col] = {
-#                     "unique_values": int(df[col].nunique()),
-#                     "most_frequent": str(mode_values.iloc[0]) if len(mode_values) > 0 else None,
-#                     "frequency": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
-#                     "total_non_null": int(df[col].count())
-#                 }
-#             except (IndexError, ValueError) as e:
-#                 # Handle edge cases where column has no valid data
-#                 categorical_stats[col] = {
-#                     "unique_values": 0,
-#                     "most_frequent": None,
-#                     "frequency": 0,
-#                     "total_non_null": 0
-#                 }
-        
-#         stats = {
-#             "null_counts": {k: make_serializable(v) for k, v in null_counts.items()},
-#             "null_percentages": {k: make_serializable(v) for k, v in null_percentages.items()},
-#             "descriptive_stats": {
-#                 col: {stat: make_serializable(desc_stats.loc[stat, col]) 
-#                       for stat in desc_stats.index} 
-#                 for col in desc_stats.columns
-#             } if not desc_stats.empty else {},
-#             "categorical_stats": categorical_stats,
-#             "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-#             "total_rows": len(df),
-#             "total_columns": len(df.columns)
-#         }
-        
-#         return stats
-        
-#     except Exception as e:
-#         logger.error(f"Error generating stats for {file_path}: {e}")
-#         import traceback
-#         logger.error(f"Traceback: {traceback.format_exc()}")
-#         return {"error": f"Failed to generate stats: {str(e)}"}
-
-# Add these new endpoints to your main.py
 
 @app.get("/merge/available/{session_id}")
 async def get_available_files_for_merge(session_id: str):
@@ -1292,18 +1333,19 @@ async def get_available_files_for_merge(session_id: str):
         for upload in uploads:
             # Only include files that have mappings and are of type 'ingestion'
             if upload.get('mappings'):
-                mapped_columns = [role for role in upload['mappings'].values() if role != "Ignore"]
-                # Use consistent naming logic
+                # Get ORIGINAL column names (keys), not roles (values)
+                original_columns = [orig_col for orig_col, role in upload['mappings'].items() if role != "Ignore"]
+                
                 name = upload.get('name') or upload.get('filename') or upload.get('original_filename') or f"File_{upload.get('id')}"
                 available_files.append({
                     'id': upload['id'],
                     'name': name,
-                    'columns': mapped_columns,
-                    'total_columns': len(mapped_columns),
+                    'columns': original_columns,  # These are now ORIGINAL column names
+                    'mappings': upload['mappings'],  # Include mappings for reference
+                    'total_columns': len(original_columns),
                     'has_processed_data': bool(upload.get('processed_data')),
                     'is_merged': upload.get('is_merged', False)
                 })
-        
         return {
             "status": "success",
             "available_files": available_files,
@@ -1318,13 +1360,14 @@ async def get_available_files_for_merge(session_id: str):
 @app.post("/merge/preview")
 async def merge_preview(payload: dict):
     """
-    Generate a preview of merged datasets
+    Generate a preview of merged datasets with original column names preserved
     """
     try:
         session_id = payload.get("session_id")
         file_ids = payload.get("file_ids", [])
         merge_strategy = payload.get("merge_strategy", "inner")
         join_columns = payload.get("join_columns", {})
+        preserve_original_names = payload.get("preserve_original_names", True)  # New option
         
         if len(file_ids) < 2:
             return {"error": "At least 2 files required for merging"}
@@ -1349,22 +1392,34 @@ async def merge_preview(payload: dict):
             
             df = pd.DataFrame(data)
             
-            # Apply mappings
-            rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
-            df.rename(columns=rename_map, inplace=True)
-            
-            # Drop ignored columns
-            cols_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
-            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+            # NEW: Handle column naming based on preserve_original_names flag
+            if preserve_original_names:
+                # Keep original column names, just drop ignored columns
+                columns_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+                df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+                
+                # Store the column mappings for metadata
+                column_metadata = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+            else:
+                # Original behavior: rename to roles and drop ignored
+                rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+                df.rename(columns=rename_map, inplace=True)
+                
+                columns_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+                df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+                
+                column_metadata = {role: role for role in rename_map.values()}
             
             datasets.append({
                 'id': file_id,
                 'name': upload.get('name', f'Dataset_{file_id}'),
-                'df': df
+                'df': df,
+                'column_metadata': column_metadata,
+                'original_mappings': mappings
             })
         
-        # Perform the merge
-        merged_df = merge_datasets(datasets, merge_strategy, join_columns)
+        # Perform the merge with enhanced metadata tracking
+        merged_df, merge_metadata = merge_datasets_enhanced(datasets, merge_strategy, join_columns)
         
         # Generate preview with proper serialization
         preview_data = merged_df.head(10).to_dict('records')
@@ -1379,7 +1434,9 @@ async def merge_preview(payload: dict):
                 "total_rows": len(merged_df),
                 "total_columns": len(merged_df.columns),
                 "columns": list(merged_df.columns),
-                "sample_data": clean_preview_data
+                "sample_data": clean_preview_data,
+                "column_metadata": merge_metadata,
+                "preserve_original_names": preserve_original_names
             }
         }
         
@@ -1392,13 +1449,14 @@ async def merge_preview(payload: dict):
 @app.post("/merge/execute")
 async def merge_execute(payload: dict):
     """
-    Execute the merge and create a new merged dataset
+    Execute the merge and create a new merged dataset with original column names
     """
     try:
         session_id = payload.get("session_id")
         file_ids = payload.get("file_ids", [])
         merge_strategy = payload.get("merge_strategy", "inner")
         join_columns = payload.get("join_columns", {})
+        preserve_original_names = payload.get("preserve_original_names", True)
         
         if len(file_ids) < 2:
             return {"error": "At least 2 files required for merging"}
@@ -1415,7 +1473,6 @@ async def merge_execute(payload: dict):
             if not upload:
                 return {"error": f"File {file_id} not found"}
             
-            # Use processed data if available, otherwise original data
             data = upload.get('processed_data') or upload.get('data')
             mappings = upload.get('mappings', {})
             
@@ -1424,22 +1481,28 @@ async def merge_execute(payload: dict):
             
             df = pd.DataFrame(data)
             
-            # Apply mappings
-            rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
-            df.rename(columns=rename_map, inplace=True)
-            
-            # Drop ignored columns
-            cols_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
-            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+            # Handle column naming consistently with preview
+            if preserve_original_names:
+                columns_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+                df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+                column_metadata = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+            else:
+                rename_map = {orig: role for orig, role in mappings.items() if role != "Ignore"}
+                df.rename(columns=rename_map, inplace=True)
+                columns_to_drop = [orig for orig, role in mappings.items() if role == "Ignore"]
+                df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+                column_metadata = {role: role for role in rename_map.values()}
             
             datasets.append({
                 'id': file_id,
                 'name': upload.get('name', f'Dataset_{file_id}'),
-                'df': df
+                'df': df,
+                'column_metadata': column_metadata,
+                'original_mappings': mappings
             })
         
-        # Execute the merge
-        merged_df = merge_datasets(datasets, merge_strategy, join_columns)
+        # Execute the merge with enhanced metadata
+        merged_df, merge_metadata = merge_datasets_enhanced(datasets, merge_strategy, join_columns)
         
         # Create new merged dataset entry
         merged_id = str(uuid.uuid4())
@@ -1460,9 +1523,17 @@ async def merge_execute(payload: dict):
             clean_row = {k: make_serializable(v) for k, v in row.items()}
             clean_sample_data.append(clean_row)
         
+        # Create enhanced mappings that preserve the original column names and their roles
+        if preserve_original_names:
+            # For merged dataset, create mappings that show original names -> roles
+            enhanced_mappings = merge_metadata.get('column_mappings', {})
+        else:
+            # Original behavior: 1:1 mapping since columns are already roles
+            enhanced_mappings = {col: col for col in merged_df.columns}
+        
         merged_metadata = {
             'id': merged_id,
-            'type': 'ingestion',  # Keep as ingestion type so it works with existing analysis
+            'type': 'ingestion',
             'name': merged_name,
             'filename': merged_name,
             'source_files': file_ids,
@@ -1471,7 +1542,9 @@ async def merge_execute(payload: dict):
             'data': clean_full_data,
             'sample_data': clean_sample_data,
             'columns': list(merged_df.columns),
-            'mappings': {col: col for col in merged_df.columns},  # 1:1 mapping since already processed
+            'mappings': enhanced_mappings,
+            'column_metadata': merge_metadata,
+            'preserve_original_names': preserve_original_names,
             'is_merged': True,
             'merge_timestamp': time.time()
         }
@@ -1489,19 +1562,38 @@ async def merge_execute(payload: dict):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {"error": f"Merge execution failed: {str(e)}"}
 
-def merge_datasets(datasets, strategy, join_columns):
+def merge_datasets_enhanced(datasets, strategy, join_columns):
     """
-    Core function to merge datasets based on strategy
+    Enhanced merge function that preserves original column names and tracks metadata
     """
     dfs = [d['df'] for d in datasets]
     
-    if strategy == 'concat':
-        # Simple concatenation
-        return pd.concat(dfs, ignore_index=True, sort=False)
+    # Collect all column metadata for the final result
+    all_column_metadata = {}
+    source_file_mapping = {}  # Track which columns came from which files
     
+    if strategy == 'concat':
+        # Simple concatenation with metadata tracking
+        result = pd.concat(dfs, ignore_index=True, sort=False)
+        
+        # For concat, merge all column metadata
+        for i, dataset in enumerate(datasets):
+            for col, role in dataset['column_metadata'].items():
+                if col in result.columns:
+                    all_column_metadata[col] = role
+                    if col not in source_file_mapping:
+                        source_file_mapping[col] = []
+                    source_file_mapping[col].append(dataset['name'])
+        
     elif strategy in ['inner', 'outer', 'left']:
-        # Join-based merging
-        result = dfs[0]
+        # Join-based merging with conflict resolution
+        result = dfs[0].copy()
+        
+        # Initialize metadata from first dataset
+        for col, role in datasets[0]['column_metadata'].items():
+            if col in result.columns:
+                all_column_metadata[col] = role
+                source_file_mapping[col] = [datasets[0]['name']]
         
         for i, next_df in enumerate(dfs[1:], 1):
             left_col = join_columns.get(datasets[0]['id'])
@@ -1510,19 +1602,48 @@ def merge_datasets(datasets, strategy, join_columns):
             if not left_col or not right_col:
                 raise ValueError(f"Join columns not specified for merge")
             
+            # Handle column name conflicts before merge
+            right_df = next_df.copy()
+            rename_map = {}
+            
+            for col in right_df.columns:
+                if col != right_col and col in result.columns:
+                    # Create unique column name
+                    new_name = f"{col}_{datasets[i]['name']}"
+                    rename_map[col] = new_name
+            
+            if rename_map:
+                right_df.rename(columns=rename_map, inplace=True)
+            
+            # Perform the merge
             result = result.merge(
-                next_df, 
+                right_df, 
                 left_on=left_col, 
                 right_on=right_col, 
                 how=strategy,
-                suffixes=('', f'_file{i+1}')
+                suffixes=('', f'_from_{datasets[i]["name"]}')
             )
-        
-        return result
+            
+            # Update metadata for new columns
+            for col, role in datasets[i]['column_metadata'].items():
+                final_col_name = rename_map.get(col, col)
+                if final_col_name in result.columns:
+                    all_column_metadata[final_col_name] = role
+                    source_file_mapping[final_col_name] = [datasets[i]['name']]
     
     else:
         raise ValueError(f"Unsupported merge strategy: {strategy}")
-
+    
+    merge_metadata = {
+        'column_mappings': all_column_metadata,
+        'source_files': source_file_mapping,
+        'merge_strategy': strategy,
+        'join_columns_used': join_columns if strategy != 'concat' else None,
+        'total_source_datasets': len(datasets),
+        'dataset_names': [d['name'] for d in datasets]
+    }
+    
+    return result, merge_metadata
 
 import pandas as pd
 import numpy as np
@@ -2124,51 +2245,64 @@ def apply_filter(df: pd.DataFrame, filter_condition: FilterCondition) -> pd.Data
     
     col_data = df[column]
     
+    # Handle null/not_null operators first (don't need value conversion)
+    if op == "is_null":
+        return df[col_data.isnull()]
+    elif op == "not_null":
+        return df[col_data.notnull()]
+    
+    # Skip filter if value is None or empty string for other operators
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        logger.warning(f"Empty value for filter on column {column}, skipping")
+        return df
+    
     try:
+        # Type conversion logic
+        converted_value = convert_value_to_column_type(col_data, value)
+        
         if op == "eq":
-            return df[col_data == value]
+            return df[col_data == converted_value]
         elif op == "ne":
-            return df[col_data != value]
+            return df[col_data != converted_value]
         elif op == "gt":
-            return df[col_data > value]
+            return df[col_data > converted_value]
         elif op == "gte":
-            return df[col_data >= value]
+            return df[col_data >= converted_value]
         elif op == "lt":
-            return df[col_data < value]
+            return df[col_data < converted_value]
         elif op == "lte":
-            return df[col_data <= value]
+            return df[col_data <= converted_value]
         elif op == "contains":
             if case_sensitive:
-                return df[col_data.astype(str).str.contains(str(value), na=False)]
+                return df[col_data.astype(str).str.contains(str(converted_value), na=False)]
             else:
-                return df[col_data.astype(str).str.contains(str(value), case=False, na=False)]
+                return df[col_data.astype(str).str.contains(str(converted_value), case=False, na=False)]
         elif op == "starts_with":
             if case_sensitive:
-                return df[col_data.astype(str).str.startswith(str(value), na=False)]
+                return df[col_data.astype(str).str.startswith(str(converted_value), na=False)]
             else:
-                return df[col_data.astype(str).str.lower().str.startswith(str(value).lower(), na=False)]
+                return df[col_data.astype(str).str.lower().str.startswith(str(converted_value).lower(), na=False)]
         elif op == "ends_with":
             if case_sensitive:
-                return df[col_data.astype(str).str.endswith(str(value), na=False)]
+                return df[col_data.astype(str).str.endswith(str(converted_value), na=False)]
             else:
-                return df[col_data.astype(str).str.lower().str.endswith(str(value).lower(), na=False)]
+                return df[col_data.astype(str).str.lower().str.endswith(str(converted_value).lower(), na=False)]
         elif op == "in":
-            if isinstance(value, list):
-                return df[col_data.isin(value)]
+            if isinstance(converted_value, list):
+                return df[col_data.isin(converted_value)]
             else:
-                return df[col_data == value]
+                return df[col_data == converted_value]
         elif op == "not_in":
-            if isinstance(value, list):
-                return df[~col_data.isin(value)]
+            if isinstance(converted_value, list):
+                return df[~col_data.isin(converted_value)]
             else:
-                return df[col_data != value]
-        elif op == "is_null":
-            return df[col_data.isnull()]
-        elif op == "not_null":
-            return df[col_data.notnull()]
+                return df[col_data != converted_value]
         elif op == "between":
             if isinstance(value, list) and len(value) == 2:
-                return df[(col_data >= value[0]) & (col_data <= value[1])]
+                # Convert both values
+                min_val = convert_value_to_column_type(col_data, value[0])
+                max_val = convert_value_to_column_type(col_data, value[1])
+                return df[(col_data >= min_val) & (col_data <= max_val)]
             else:
                 logger.warning(f"Between filter requires list of 2 values, got: {value}")
                 return df
@@ -2178,7 +2312,55 @@ def apply_filter(df: pd.DataFrame, filter_condition: FilterCondition) -> pd.Data
             
     except Exception as e:
         logger.error(f"Error applying filter {op} to column {column}: {e}")
+        logger.error(f"Column dtype: {col_data.dtype}, Value: {value}, Type: {type(value)}")
         return df
+
+def convert_value_to_column_type(col_data: pd.Series, value):
+    """Convert filter value to match the column's data type"""
+    if value is None:
+        return None
+    
+    # Handle list values (for 'in', 'not_in', 'between' operators)
+    if isinstance(value, list):
+        return [convert_single_value_to_column_type(col_data, v) for v in value]
+    
+    return convert_single_value_to_column_type(col_data, value)
+
+def convert_single_value_to_column_type(col_data: pd.Series, value):
+    """Convert a single value to match the column's data type"""
+    if value is None or pd.isna(value):
+        return None
+    
+    col_dtype = col_data.dtype
+    
+    try:
+        # Numeric types
+        if pd.api.types.is_numeric_dtype(col_data):
+            if pd.api.types.is_integer_dtype(col_data):
+                return int(float(str(value)))  # Handle cases like "5.0" -> 5
+            else:
+                return float(str(value))
+        
+        # DateTime types
+        elif pd.api.types.is_datetime64_any_dtype(col_data):
+            if isinstance(value, str):
+                return pd.to_datetime(value)
+            return value
+        
+        # Boolean types
+        elif pd.api.types.is_bool_dtype(col_data):
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+        
+        # String/object types - keep as string
+        else:
+            return str(value)
+    
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Could not convert value '{value}' to column type {col_dtype}: {e}")
+        # Fall back to string representation
+        return str(value)
 
 def apply_search(df: pd.DataFrame, search_term: str, search_columns: Optional[List[str]] = None) -> pd.DataFrame:
     """Apply global search across specified columns or all text columns"""
