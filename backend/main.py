@@ -839,17 +839,72 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         # Clean the data
         df_clean = df.copy()
 
-        # Convert to numeric if possible
+        # Smart column type conversion - handle dates, numerics, and categoricals appropriately
         for col in [actual_x_column, actual_y_column] if actual_y_column else [actual_x_column]:
             if col in df_clean.columns:
-                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                # Check if column looks like a date/time column
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in ['date', 'time', 'datetime', 'timestamp']):
+                    # Try to parse as datetime
+                    try:
+                        df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+                        logger.info(f"Converted {col} to datetime")
+                    except Exception as e:
+                        logger.warning(f"Could not convert {col} to datetime: {e}")
+                else:
+                    # Try numeric conversion for non-date columns
+                    try:
+                        df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                        logger.info(f"Converted {col} to numeric")
+                    except Exception as e:
+                        logger.warning(f"Could not convert {col} to numeric: {e}")
+
+        # Remove rows with NaN/inf in key columns
+        columns_to_check = [actual_x_column, actual_y_column] if actual_y_column else [actual_x_column]
+        df_clean = df_clean.replace([np.inf, -np.inf], np.nan)
+        df_clean = df_clean.dropna(subset=columns_to_check)
 
         if df_clean.empty:
             raise ValueError("No valid data remaining after cleaning")
+        
+        # Store original count for statistics and downsampling info
+        original_count = len(df_clean)
+        
+        # Smart downsampling for large datasets to prevent frontend rendering issues
+        MAX_POINTS = 5000  # Maximum points to send to frontend
+        was_downsampled = False
+        
+        def smart_downsample(df, max_points, x_col, y_col=None):
+            """Intelligently downsample data while preserving patterns"""
+            if len(df) <= max_points:
+                return df, False
+            
+            # For time series or sequential data, use systematic sampling
+            if pd.api.types.is_datetime64_any_dtype(df[x_col]) or df[x_col].is_monotonic_increasing:
+                # Keep evenly spaced points
+                indices = np.linspace(0, len(df) - 1, max_points, dtype=int)
+                return df.iloc[indices].copy(), True
+            
+            # For scatter data, use stratified sampling to preserve distribution
+            else:
+                # Sort by x to maintain some structure
+                df_sorted = df.sort_values(x_col)
+                indices = np.linspace(0, len(df_sorted) - 1, max_points, dtype=int)
+                return df_sorted.iloc[indices].copy(), True
 
         # Initialize containers for insights and statistical summary
         statistical_summary = {}
         insights = []
+        
+        # Add downsampling notice if applicable (will be set later)
+        if original_count > MAX_POINTS:
+            was_downsampled = True
+            insights.append(f"Dataset downsampled from {original_count:,} to {MAX_POINTS:,} points for optimal rendering. Statistical calculations use full dataset.")
+            statistical_summary["downsampled"] = True
+            statistical_summary["original_count"] = original_count
+            statistical_summary["displayed_count"] = MAX_POINTS
+        else:
+            statistical_summary["downsampled"] = False
 
         def get_display_label(col_name):
             """Get a user-friendly label for display"""
@@ -877,67 +932,101 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
             if not actual_y_column:
                 raise ValueError(f"{analysis_type} plot requires both x and y columns")
             
-            processed_data = df_clean[[actual_x_column, actual_y_column]].to_dict('records')
-            
-            # Enhanced analysis for scatter/line plots
+            # Calculate statistics on FULL dataset before downsampling
             if len(df_clean) > 1:
-                corr, p_value = pearsonr(df_clean[actual_x_column], df_clean[actual_y_column])
-                statistical_summary = {
-                    "correlation": corr,
-                    "p_value": p_value,
-                    "sample_size": len(df_clean),
-                    "x_mean": df_clean[actual_x_column].mean(),
-                    "y_mean": df_clean[actual_y_column].mean(),
-                    "x_std": df_clean[actual_x_column].std(),
-                    "y_std": df_clean[actual_y_column].std(),
-                    "x_range": [df_clean[actual_x_column].min(), df_clean[actual_x_column].max()],
-                    "y_range": [df_clean[actual_y_column].min(), df_clean[actual_y_column].max()]
-                }
-                
-                # Generate insights based on correlation
-                if abs(corr) > 0.7:
-                    strength = "strong"
-                elif abs(corr) > 0.5:
-                    strength = "moderate"
-                elif abs(corr) > 0.3:
-                    strength = "weak"
-                else:
-                    strength = "very weak"
-                
-                direction = "positive" if corr > 0 else "negative"
-                
-                insights.append(f"There is a {strength} {direction} correlation (r = {corr:.3f}) between {get_display_label(actual_x_column)} and {get_display_label(actual_y_column)}.")
-                
-                if p_value < 0.05:
-                    insights.append(f"The correlation is statistically significant (p = {p_value:.3f}), suggesting a meaningful relationship.")
-                else:
-                    insights.append(f"The correlation is not statistically significant (p = {p_value:.3f}), suggesting the relationship may be due to random variation.")
-                
-                # Marine science specific insights
-                if 'temperature' in actual_x_column.lower() and 'depth' in actual_y_column.lower():
-                    if corr < -0.3:
-                        insights.append("This negative relationship between temperature and depth is typical in ocean profiles, showing thermocline structure.")
-                elif 'salinity' in actual_x_column.lower() and 'temperature' in actual_y_column.lower():
-                    insights.append("This temperature-salinity relationship can reveal water mass characteristics and mixing processes.")
+                try:
+                    # Use full dataset for accurate statistics
+                    x_data = df_clean[actual_x_column].dropna()
+                    y_data = df_clean[actual_y_column].dropna()
+                    
+                    # Only calculate correlation for numeric data
+                    if pd.api.types.is_numeric_dtype(x_data) and pd.api.types.is_numeric_dtype(y_data):
+                        corr, p_value = pearsonr(x_data, y_data)
+                        statistical_summary.update({
+                            "correlation": make_serializable(corr),
+                            "p_value": make_serializable(p_value),
+                        })
+                        
+                        # Generate insights based on correlation
+                        if abs(corr) > 0.7:
+                            strength = "strong"
+                        elif abs(corr) > 0.5:
+                            strength = "moderate"
+                        elif abs(corr) > 0.3:
+                            strength = "weak"
+                        else:
+                            strength = "very weak"
+                        
+                        direction = "positive" if corr > 0 else "negative"
+                        
+                        insights.append(f"There is a {strength} {direction} correlation (r = {corr:.3f}) between {get_display_label(actual_x_column)} and {get_display_label(actual_y_column)}.")
+                        
+                        if p_value < 0.05:
+                            insights.append(f"The correlation is statistically significant (p = {p_value:.3f}), suggesting a meaningful relationship.")
+                        else:
+                            insights.append(f"The correlation is not statistically significant (p = {p_value:.3f}), suggesting the relationship may be due to random variation.")
+                    
+                    # Add general statistics
+                    statistical_summary.update({
+                        "sample_size": make_serializable(original_count),
+                        "x_mean": make_serializable(df_clean[actual_x_column].mean()),
+                        "y_mean": make_serializable(df_clean[actual_y_column].mean()),
+                        "x_std": make_serializable(df_clean[actual_x_column].std()),
+                        "y_std": make_serializable(df_clean[actual_y_column].std()),
+                        "x_range": [
+                            make_serializable(df_clean[actual_x_column].min()), 
+                            make_serializable(df_clean[actual_x_column].max())
+                        ],
+                        "y_range": [
+                            make_serializable(df_clean[actual_y_column].min()), 
+                            make_serializable(df_clean[actual_y_column].max())
+                        ]
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not calculate statistics: {e}")
+                    statistical_summary["error"] = "Could not calculate some statistics"
+            
+            # NOW downsample for visualization if needed
+            df_for_viz = df_clean
+            if original_count > MAX_POINTS:
+                df_for_viz, _ = smart_downsample(df_clean, MAX_POINTS, actual_x_column, actual_y_column)
+            
+            # Get clean data for processing (downsampled if needed)
+            processed_df = df_for_viz[[actual_x_column, actual_y_column]].copy()
+            
+            # Convert datetime columns to string for JSON serialization
+            for col in processed_df.columns:
+                if pd.api.types.is_datetime64_any_dtype(processed_df[col]):
+                    processed_df[col] = processed_df[col].astype(str)
+            
+            processed_data = [
+                {k: make_serializable(v) for k, v in row.items()}
+                for row in processed_df.to_dict('records')
+            ]
         
         elif analysis_type == "bar":
             if actual_y_column:
                 grouped = df_clean.groupby(actual_x_column)[actual_y_column].agg(['mean', 'std', 'count']).reset_index()
-                processed_data = grouped.rename(columns={'mean': actual_y_column}).to_dict('records')
+                processed_data = [
+                    {k: make_serializable(v) for k, v in row.items()}
+                    for row in grouped.rename(columns={'mean': actual_y_column}).to_dict('records')
+                ]
                 
                 # Statistical summary for grouped data
-                statistical_summary = {
-                    "groups": len(grouped),
-                    "total_observations": grouped['count'].sum(),
-                    "mean_values": grouped['mean'].tolist(),
-                    "std_values": grouped['std'].tolist(),
-                    "group_sizes": grouped['count'].tolist()
-                }
+                statistical_summary.update({
+                    "groups": make_serializable(len(grouped)),
+                    "total_observations": make_serializable(grouped['count'].sum()),
+                    "mean_values": [make_serializable(v) for v in grouped['mean'].tolist()],
+                    "std_values": [make_serializable(v) for v in grouped['std'].tolist()],
+                    "group_sizes": [make_serializable(v) for v in grouped['count'].tolist()]
+                })
                 
                 # Generate insights
-                max_group = grouped.loc[grouped['mean'].idxmax(), actual_x_column]
-                min_group = grouped.loc[grouped['mean'].idxmin(), actual_x_column]
-                overall_mean = grouped['mean'].mean()
+                max_idx = grouped['mean'].idxmax()
+                min_idx = grouped['mean'].idxmin()
+                max_group = make_serializable(grouped.loc[max_idx, actual_x_column])
+                min_group = make_serializable(grouped.loc[min_idx, actual_x_column])
+                overall_mean = make_serializable(grouped['mean'].mean())
                 
                 insights.append(f"The analysis shows {len(grouped)} different groups with varying {get_display_label(actual_y_column)} values.")
                 insights.append(f"'{max_group}' has the highest average value, while '{min_group}' has the lowest.")
@@ -947,14 +1036,17 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
                 # Count occurrences
                 value_counts = df_clean[actual_x_column].value_counts().reset_index()
                 value_counts.columns = [actual_x_column, 'count']
-                processed_data = value_counts.to_dict('records')
+                processed_data = [
+                    {k: make_serializable(v) for k, v in row.items()}
+                    for row in value_counts.to_dict('records')
+                ]
                 
-                statistical_summary = {
-                    "unique_categories": len(value_counts),
-                    "total_observations": value_counts['count'].sum(),
-                    "most_common": value_counts.iloc[0][actual_x_column],
-                    "most_common_count": value_counts.iloc[0]['count']
-                }
+                statistical_summary.update({
+                    "unique_categories": make_serializable(len(value_counts)),
+                    "total_observations": make_serializable(value_counts['count'].sum()),
+                    "most_common": make_serializable(value_counts.iloc[0][actual_x_column]),
+                    "most_common_count": make_serializable(value_counts.iloc[0]['count'])
+                })
                 
                 insights.append(f"The data contains {len(value_counts)} unique categories in {get_display_label(actual_x_column)}.")
                 insights.append(f"'{statistical_summary['most_common']}' is the most frequent category with {statistical_summary['most_common_count']} occurrences.")
@@ -965,55 +1057,90 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         elif analysis_type == "area":
             if not actual_y_column:
                 raise ValueError("Area plot requires both x and y columns")
-            processed_data = df_clean[[actual_x_column, actual_y_column]].sort_values(actual_x_column).to_dict('records')
             
-            # Time series or sequential analysis
-            statistical_summary = {
-                "data_points": len(df_clean),
-                "trend": "increasing" if df_clean[actual_y_column].iloc[-1] > df_clean[actual_y_column].iloc[0] else "decreasing",
-                "total_change": df_clean[actual_y_column].iloc[-1] - df_clean[actual_y_column].iloc[0],
-                "peak_value": df_clean[actual_y_column].max(),
-                "valley_value": df_clean[actual_y_column].min()
-            }
+            sorted_df = df_clean[[actual_x_column, actual_y_column]].sort_values(actual_x_column).copy()
+            
+            # Downsample if needed
+            df_for_viz = sorted_df
+            if original_count > MAX_POINTS:
+                indices = np.linspace(0, len(sorted_df) - 1, MAX_POINTS, dtype=int)
+                df_for_viz = sorted_df.iloc[indices].copy()
+            
+            # Convert datetime columns to string for JSON serialization
+            for col in df_for_viz.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_for_viz[col]):
+                    df_for_viz[col] = df_for_viz[col].astype(str)
+            
+            processed_data = [
+                {k: make_serializable(v) for k, v in row.items()}
+                for row in df_for_viz.to_dict('records')
+            ]
+            
+            # Time series or sequential analysis (using original full dataset for stats)
+            first_val = make_serializable(df_clean[actual_y_column].iloc[0])
+            last_val = make_serializable(df_clean[actual_y_column].iloc[-1])
+            
+            statistical_summary.update({
+                "data_points": make_serializable(original_count),
+                "trend": "increasing" if last_val > first_val else "decreasing",
+                "total_change": make_serializable(last_val - first_val),
+                "peak_value": make_serializable(df_clean[actual_y_column].max()),
+                "valley_value": make_serializable(df_clean[actual_y_column].min())
+            })
             
             insights.append(f"The area plot shows {statistical_summary['trend']} trend over the range of {get_display_label(actual_x_column)}.")
             insights.append(f"Total change from start to end: {statistical_summary['total_change']:.2f}")
         
         elif analysis_type == "histogram":
             # Create bins for histogram
-            hist_data, bin_edges = np.histogram(df_clean[actual_x_column], bins=20)
+            hist_data, bin_edges = np.histogram(df_clean[actual_x_column].dropna(), bins=20)
             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
             
             processed_data = [
-                {actual_x_column: float(center), 'frequency': int(count)} 
+                {
+                    actual_x_column: make_serializable(center), 
+                    'frequency': make_serializable(count)
+                } 
                 for center, count in zip(bin_centers, hist_data)
             ]
             
             # Enhanced statistical analysis for distribution
             data_values = df_clean[actual_x_column].dropna()
-            statistical_summary = {
-                "mean": data_values.mean(),
-                "median": data_values.median(),
-                "std_dev": data_values.std(),
-                "skewness": data_values.skew(),
-                "kurtosis": data_values.kurtosis(),
-                "range": [data_values.min(), data_values.max()],
-                "quartiles": [data_values.quantile(0.25), data_values.quantile(0.5), data_values.quantile(0.75)]
-            }
+            statistical_summary.update({
+                "mean": make_serializable(data_values.mean()),
+                "median": make_serializable(data_values.median()),
+                "std_dev": make_serializable(data_values.std()),
+                "skewness": make_serializable(data_values.skew()),
+                "kurtosis": make_serializable(data_values.kurtosis()),
+                "range": [
+                    make_serializable(data_values.min()), 
+                    make_serializable(data_values.max())
+                ],
+                "quartiles": [
+                    make_serializable(data_values.quantile(0.25)), 
+                    make_serializable(data_values.quantile(0.5)), 
+                    make_serializable(data_values.quantile(0.75))
+                ]
+            })
             
             # Generate distribution insights
-            if abs(statistical_summary["skewness"]) < 0.5:
-                distribution_shape = "approximately normal"
-            elif statistical_summary["skewness"] > 0.5:
-                distribution_shape = "right-skewed (positively skewed)"
-            else:
-                distribution_shape = "left-skewed (negatively skewed)"
+            skewness = statistical_summary.get("skewness")
+            if skewness is not None:
+                if abs(skewness) < 0.5:
+                    distribution_shape = "approximately normal"
+                elif skewness > 0.5:
+                    distribution_shape = "right-skewed (positively skewed)"
+                else:
+                    distribution_shape = "left-skewed (negatively skewed)"
+                
+                insights.append(f"The distribution of {get_display_label(actual_x_column)} appears {distribution_shape}.")
             
-            insights.append(f"The distribution of {get_display_label(actual_x_column)} appears {distribution_shape}.")
-            insights.append(f"Mean: {statistical_summary['mean']:.2f}, Median: {statistical_summary['median']:.2f}, Standard Deviation: {statistical_summary['std_dev']:.2f}")
+            mean_val = statistical_summary.get("mean")
+            median_val = statistical_summary.get("median")
+            std_val = statistical_summary.get("std_dev")
             
-            if abs(statistical_summary['mean'] - statistical_summary['median']) > statistical_summary['std_dev'] * 0.1:
-                insights.append("The difference between mean and median suggests some asymmetry in the data distribution.")
+            if all(v is not None for v in [mean_val, median_val, std_val]):
+                insights.append(f"Mean: {mean_val:.2f}, Median: {median_val:.2f}, Standard Deviation: {std_val:.2f}")
             
             visualization_config["config"]["yAxis"] = 'frequency'
             visualization_config["config"]["yAxisLabel"] = 'Frequency'
@@ -1024,8 +1151,8 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
         
         # Add general data quality insights
         if actual_y_column:
-            missing_x = df[actual_x_column].isnull().sum()
-            missing_y = df[actual_y_column].isnull().sum()
+            missing_x = int(df[actual_x_column].isnull().sum())
+            missing_y = int(df[actual_y_column].isnull().sum())
             if missing_x > 0 or missing_y > 0:
                 insights.append(f"Note: {missing_x + missing_y} data points were excluded due to missing values.")
         
@@ -1034,7 +1161,6 @@ def perform_data_analysis(df: pd.DataFrame, analysis_config: Dict, mappings: Dic
     except Exception as e:
         logger.error(f"Error in data analysis: {e}")
         raise e
-
 # Update the analysis tool to work better with mixed column naming
 # Replace the existing create_analysis_tool function with this enhanced version:
 
